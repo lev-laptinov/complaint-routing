@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.DS_Store
+# data and models go to DVC (Lab 2), never to git
+data/
+mlruns/
+*.zip
+lab-1.pdf

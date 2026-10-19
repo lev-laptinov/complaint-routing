@@ -1,0 +1,10 @@
+# Runs the same ruff that `make lint` runs (pinned in uv.lock), not a separate copy.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check
+        entry: uv run ruff check .
+        language: system
+        pass_filenames: false
+        types: [python]
