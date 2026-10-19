@@ -309,22 +309,37 @@ The narrative is not stored in the feature store: it arrives with the request. T
 
 #### Deployment (first draft; Lab 4 replaces it)
 
+Each box names the local component and, in italics, its managed equivalent on AWS / GCP / Azure.
+
 ```mermaid
 flowchart TB
+    CFPB["CFPB archive + API"]
     subgraph LAPTOP["Laptop / Minikube"]
-        MINIO["MinIO: raw/, clean/, MLflow artifacts<br/><i>S3 / Cloud Storage / Blob Storage</i>"]
-        DVC["DVC remote on MinIO<br/><i>S3 / GCS / Azure Blob remote</i>"]
-        PG["PostgreSQL 16: MLflow backend, Feast online store,<br/>prediction log<br/><i>RDS / Cloud SQL / Azure DB for PostgreSQL</i>"]
-        AF["Airflow 3.3.1<br/><i>MWAA / Cloud Composer / Data Factory</i>"]
-        FEAST["Feast 0.66.0<br/><i>SageMaker / Vertex AI / Azure ML feature store</i>"]
-        MLF["MLflow 3.16.1<br/><i>SageMaker with MLflow / Vertex AI Experiments + Model Registry / Azure ML with MLflow</i>"]
-        SVC["Routing API: FastAPI + model<br/><i>EKS / GKE / AKS</i>"]
-        MON["Evidently, Prometheus, Grafana<br/><i>SageMaker Model Monitor + CloudWatch /<br/>Vertex AI Model Monitoring + Cloud Monitoring /<br/>Azure ML model monitoring + Azure Monitor</i>"]
-        REG["Minikube built-in container registry<br/><i>ECR / Artifact Registry / ACR</i>"]
-        VEC["Lab 3: pgvector 0.8.7 + LLM API<br/><i>OpenSearch Serverless + Bedrock / Vertex AI Vector Search + generative AI /<br/>Azure AI Search + Azure OpenAI</i>"]
+        direction TB
+        subgraph DATA["Storage"]
+            direction LR
+            MINIO["MinIO: raw/, clean/, MLflow artifacts<br/><i>S3 / Cloud Storage / Blob Storage</i>"]
+            DVC["DVC remote on MinIO<br/><i>S3 / GCS / Azure Blob remote</i>"]
+            PG["PostgreSQL 16: MLflow backend,<br/>Feast online store, prediction log<br/><i>RDS / Cloud SQL /<br/>Azure DB for PostgreSQL</i>"]
+        end
+        subgraph PIPE["Pipeline and registry"]
+            direction LR
+            AF["Airflow 3.3.1<br/><i>MWAA / Cloud Composer /<br/>Data Factory</i>"]
+            FEAST["Feast 0.66.0<br/><i>SageMaker / Vertex AI /<br/>Azure ML feature store</i>"]
+            MLF["MLflow 3.16.1<br/><i>SageMaker with MLflow /<br/>Vertex AI Experiments + Registry /<br/>Azure ML with MLflow</i>"]
+        end
+        subgraph SERVE["Serving and monitoring"]
+            direction LR
+            SVC["Routing API: FastAPI + model<br/><i>EKS / GKE / AKS</i>"]
+            REG["Minikube container registry<br/><i>ECR / Artifact Registry / ACR</i>"]
+            MON["Evidently, Prometheus, Grafana<br/><i>Model Monitor + CloudWatch /<br/>Vertex AI Monitoring + Cloud Monitoring /<br/>Azure ML monitoring + Azure Monitor</i>"]
+            VEC["Lab 3: pgvector 0.8.7 + LLM API<br/><i>OpenSearch + Bedrock /<br/>Vector Search + Vertex AI /<br/>AI Search + Azure OpenAI</i>"]
+        end
+        DATA ~~~ PIPE ~~~ SERVE
     end
-    CFPB["CFPB archive + API"] --> AF
-    CLIENT["Intake service (client)"] --> SVC
+    CLIENT["Intake service (client)"]
+    CFPB --> PIPE
+    CLIENT --> SERVE
 ```
 
 ### 6.2 Infra
