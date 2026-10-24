@@ -1,6 +1,6 @@
 # Complaint routing — design document
 
-> Status: Lab 1 draft. Statements marked **Assumption** are decisions taken without data yet; later labs confirm or revise them.
+> Status: Lab 2. Sections 5.2–5.4, 6.1, 6.2, 6.4, 6.5, 6.8 and 7.2 now describe what is built and measured; statements still marked **Assumption** are decisions taken without data yet.
 > Section numbers follow the [ml-design-docs](https://github.com/eugeneyan/ml-design-docs) template and must not change.
 
 ## 1 Overview
@@ -113,18 +113,26 @@ Accuracy is deliberately not a target. Among all complaints, credit reporting is
     - May 2026 has 619,940 complaints, of which 17,528 (2.8 %) have a narrative.
     - The weekly count grows from 3,311 to 4,924 through the month.
     - The median narrative is 1,053 characters long; 77.9 % contain `XXXX` masks.
-  - **Assumption:** June and July 2026 have a similar volume (checked in Lab 2). August does not (above).
+  - **Checked in Lab 2 (2026-10-24), all 55 months 2022-01 → 2026-07:** every month has between 10,002 (2026-07) and 172,937 (2025-01) complaints with a narrative; June 2026 has 16,820. August does not (above).
+  - Lab 2 uses the 18 exports that cover 2022-01 → 2026-07 (1.1 GB zipped; list in `src/complaint_routing/ingest.py`).
   - This is the text source for training.
 - **Live CFPB API** (`consumerfinance.gov/data-research/consumer-complaints/search/api/v1/`, CC0 licence).
   - Structured complaints, updated daily: 18.5 M records in total on 2026-10-19.
   - **Since 2026-08-14 it publishes no narratives.** The CFPB ended narrative publication; the structured fields are still published.
-  - We use it to monitor the product mix after August 2026, and as a real case of an upstream schema change (6.6, 6.9).
+  - We use it to monitor the product mix after August 2026, and as a real case of an upstream schema change (6.6, 6.9). It is not ingested in Lab 2; Lab 4 adds it.
 
-**Arrival pattern.**
-- Monthly batches, cut by `date_received`.
+**Arrival pattern and batch grain.**
+- **One batch = one calendar month of `date_received`**, which is exactly one Airflow data interval [month start, next month start).
 - Until 2026-08 these come from the archive, **replayed on a simulated clock**: Lab 2's "next month" is the next archive month.
 - After 2026-08 they come from the live API, structured fields only.
 - The CFPB publishes a complaint after the company responds or after 15 days, whichever comes first, so a month is complete about 15 days after it ends.
+
+**The raw layer as built (Lab 2).**
+- **Sample.** Each archive month is far larger than the course needs, so the raw layer is a seeded sample: per month, complaints with a narrative, deduplicated by `Complaint ID`, 1,500 drawn with `sample(random_state=YYYYMM)`. 55 Parquet files, 82,500 rows, 26 MB, all 16 columns as delivered. Rebuilding from the archive gives byte-identical files.
+- **Data version identifier:** the DVC md5 of `data/raw`, currently `835e7d9b012a06bf4e2bddb624fdaf4f.dir`. Every row loaded by the pipeline and every MLflow run carries it as `data_version`. Remote: MinIO bucket `s3://dvc/complaint-routing`.
+- **Products → queues.** 14 product names occur in 2022–2026 (old and new taxonomy); `config/queue_mapping.csv` maps them to **10 queues**. *Credit card*, *Credit card or prepaid card* and *Prepaid card* share one queue `card`, because the 2017–2023 taxonomy did not separate them.
+- **Cleaning removed 11,081 of 82,500 sampled rows (13.4 %):** 10,803 narratives whose exact text already appeared in the same month (template complaints filed many times), 278 narratives under 50 characters. No unknown products, unparseable ids or dates.
+- **The narrative population itself shifted.** Among sampled complaints with a narrative, credit reporting is **66.8 % in 2022-01 → 2026-02** but **3.8 % in 2026-03 → 2026-07**; debt collection goes from 10.2 % to 29.5 %. In 2025 the CFPB published narratives mostly for credit-reporting complaints (2025-01 alone has 172,937), in 2026 almost none. The validation and test months are therefore a different label distribution from training (prior shift), on top of the selection bias below.
 
 **Labels and their delay.**
 - The label is the routing queue, derived from `product` through the mapping table. The current taxonomy has 11 products, so there are 11 queues before mapping.
@@ -178,9 +186,9 @@ Some narratives are not complaints at all; for example, a pasted chatbot convers
 
 ### 5.3 Techniques
 
-- **Baseline 1 (trivial).** Always predict the majority queue of the training data (debt collection on narrative data). On May 2026 narratives that gives accuracy 0.33 and macro-F1 ≈ 0.04 (one queue out of 11 with F1 ≈ 0.49). This sets the floor.
+- **Baseline 1 (trivial).** Always predict the majority queue of the training data. Lab 1 expected debt collection (the May 2026 majority); on the actual training months 2022-01 → 2026-02 it is **credit reporting (66.8 %)**, which is only 4 % of the test months (results in 7.2). This sets the floor.
 - **Baseline 2 (rules).** Keyword rules per queue ("mortgage", "escrow" → mortgage; "collector", "owe" → debt collection; …), with fallback to the majority queue. This is the "would a rule do?" check.
-- **Candidate.** TF-IDF (word 1–2-grams) on the scrubbed narrative + one-hot company, state, channel and tags + company product-mix features → logistic regression with class weights.
+- **Candidate.** TF-IDF (word 1–2-grams, `min_df=3`, ≤ 100,000 terms, sublinear tf) on the scrubbed narrative + one-hot company, state, channel and tags (categories with < 20 rows grouped) + the 10 company queue-mix shares → logistic regression with balanced class weights, `C=4`.
   - It is cheap to train on CPU and fast to serve, and the coefficients are explainable.
   - A fine-tuned small transformer (DistilBERT-class) is a later alternative, used only if the linear model misses the per-queue recall target.
 
@@ -189,10 +197,12 @@ Some narratives are not complaints at all; for example, a pasted chatbot convers
 | Feature | Training-time source | Serving-time source |
 |---|---|---|
 | Narrative TF-IDF | archive narrative, already scrubbed by CFPB | raw intake text → **our** `scrub_pii()` → same versioned vectorizer |
-| Narrative length, `XXXX` share | archive narrative | computed by the same code from the request |
-| Company (top-N one-hot, rest "other") | archive `company` | intake form field |
+| Narrative length, `XXXX` share (computed in `dwh.complaints`; quality and monitoring inputs, not model inputs in v1) | archive narrative | computed by the same code from the request |
+| Company (one-hot, companies with < 20 training rows grouped) | archive `company` | intake form field |
 | State, submitted via, tags | archive fields | intake form fields |
-| `company_product_mix_90d` (share of each queue in the company's last 90 days) | Feast offline store, point-in-time join on `date_received` | Feast online store, refreshed daily |
+| `company_queue_mix` (`mix_<queue>` for 10 queues + `mix_n`; `feature_version = v1`) | `features.complaint_features`, filled by the pipeline task `build_features`; Feast offline store = that table, point-in-time join | Feast online store (PostgreSQL schema `feast_online`), refreshed by `feast materialize` |
+
+**Definition of `company_queue_mix`.** For a complaint received on day *d*: the share of each queue among the same company's complaints received in [*d* − 150 days, *d* − 60 days), and their count. The window ends 60 days before *d* because the final queue of a complaint is known only when it closes, up to 60 days after receipt (5.2). A window [*d* − 90, *d*) would read labels that do not exist yet at serving time. The pipeline computes it month by month from the warehouse; training computes it from the DVC files with the same function. Both give identical values for all 71,419 rows (checked in Lab 2).
 
 Two fields carry less signal than they seem:
 - `Submitted via` is 99.6 % web. It is kept because it costs nothing, but it barely helps.
@@ -200,7 +210,7 @@ Two fields carry less signal than they seem:
 
 Two features have a serving-time source that differs from the training-time source:
 - **Narrative.** CFPB scrubbed the training text with its own tool, while serving text is raw and goes through our `scrub_pii()`. If the two scrubbers differ, the text differs.
-- **Company product mix.** Training uses an exact point-in-time join; serving uses yesterday's snapshot.
+- **Company queue mix.** Training reads the exact point-in-time value per complaint; serving reads the latest materialized value per company, which can be up to one refresh old.
 
 ### 5.4 Experimentation and validation
 
@@ -208,9 +218,10 @@ Two features have a serving-time source that differs from the training-time sour
   - Train on 2022-01 → 2026-02, validate on 2026-03 → 2026-04, test on 2026-05 → 2026-07.
   - A random split would mix months before and after a taxonomy change, and complaints from one company campaign, into both sides. It would also let the 90-day company feature see the future, so the score would overstate what the model does next month.
   - For monthly retrains we use a rolling window: train on everything up to *t−1*, test on month *t*.
-- **Population check.** The test months contain only complaints with a narrative, where credit reporting is 4 %. Besides the plain test score, we report accuracy re-weighted to the full product mix of the same months (from the structured data, where credit reporting is 91 %). That is the estimate of what an intake service would see.
+- **Population check.** The test months contain only complaints with a narrative, where credit reporting is 4 %. Besides the plain test score, we report accuracy re-weighted to the full queue mix of the same months: Σ over queues of (share of the queue among *all* 1,912,770 complaints of 2026-05 → 07) × (recall of the queue). The mix (credit reporting 91.4 %) is in `config/test_population_mix.csv`, built from the archive by `make population-mix`.
+- **Why the split must be by time here, in numbers.** Credit reporting is 66.8 % of the training months and 3.8 % of the test months (5.2). A random split would put both periods on both sides and report a score for a label mix that no future month has.
 - **Offline metric.** Macro-F1 over queues (optimizing), with per-queue recall ≥ 0.60 (satisficing). We also report a confusion matrix and the per-queue support.
-- **New vs current model.** Both are scored on the same latest held-out month(s). The candidate is promoted only if:
+- **New vs current model.** Lab 2 registers the first model (`complaint-router` v1) and sets the alias `champion` directly, since there is nothing to compare against. From version 2 on, both are scored on the same latest held-out month(s), and the candidate is promoted only if:
   - macro-F1 ≥ production + 0.01;
   - no queue's recall drops by more than 5 pp;
   - every queue's recall stays ≥ 0.60;
@@ -251,59 +262,67 @@ flowchart LR
 
 #### Data flow (seven layers)
 
-The three marks are drawn as circles:
-- **V**, the version point after ingestion;
-- **Q**, the quality gate before the feature store;
+Real component names as of Lab 2; layers 6–7 are still the plan for Lab 4. The three marks are drawn as circles:
+- **V**, the version point: DVC md5 of `data/raw`, stamped on every row as `data_version`;
+- **Q**, the quality gate: Airflow tasks `validate` (raw contract) and `quality_check` (loaded data);
 - **the split** between the offline side (training) and the online side (serving), inside layer 3.
 
 ```mermaid
 flowchart TB
-    subgraph L1["1 Data ingestion (batch, monthly)"]
-        I1["Airflow DAG ingest_month:<br/>archive replay or live API → MinIO raw/ (Parquet)"]
+    subgraph L1["1 Data ingestion (monthly batch = Airflow data interval)"]
+        I0["complaint_routing.ingest:<br/>CFPB archive ZIPs → seeded sample<br/>data/raw/complaints_YYYY-MM.parquet"]
+        I1["Airflow DAG complaints_etl · extract<br/>(month from data_interval_start)"]
     end
-    V(("V: DVC version<br/>per month"))
-    subgraph L2["2 Preprocessing"]
-        P1["Normalise schema, map product → queue<br/>(versioned mapping table)"]
-        P2["Drop rows without narrative,<br/>dedupe complaint_id, scrub_pii()"]
+    V(("V: DVC md5 of data/raw<br/>remote s3://dvc on MinIO"))
+    Q1(("Q: validate<br/>schema, rows, null share,<br/>unknown products, dates, stale file"))
+    subgraph L2["2 Preprocessing (PostgreSQL warehouse)"]
+        P1["transform: rename, type, scrub_pii(),<br/>product → queue (config/queue_mapping.csv),<br/>drop short and duplicate narratives"]
+        P2["load: delete-then-insert the month into<br/>raw.complaints, dwh.complaints"]
     end
-    Q(("Q: quality gate<br/>schema, null-narrative share,<br/>unknown products, date range"))
-    subgraph L3["3 Feature store — Feast"]
-        F1["Offline: clean Parquet on MinIO,<br/>company_product_mix_90d point-in-time"]
-        F2["Online: PostgreSQL,<br/>company_product_mix_90d, daily materialise"]
+    subgraph L3["3 Features"]
+        F0["build_features → features.complaint_features<br/>company_queue_mix, feature_version v1"]
+        Q2(("Q: quality_check<br/>counts, dates, versions"))
+        F1["Feast offline: PostgreSQLSource on<br/>features.complaint_features (point-in-time)"]
+        F2["Feast online: PostgreSQL schema feast_online<br/>(feast materialize)"]
     end
-    subgraph L4["4 Training pipeline"]
-        T1["Airflow DAG train_evaluate:<br/>TF-IDF + logistic regression, time split,<br/>baselines, log to MLflow"]
+    subgraph L4["4 Training"]
+        T1["complaint_routing.train: same clean() and features<br/>from the DVC files, time split,<br/>2 rule baselines + TF-IDF logistic regression"]
     end
-    subgraph L5["5 Registry and deploy"]
-        R1["MLflow registry, promotion rule 5.4,<br/>alias production"]
+    subgraph L5["5 Registry"]
+        R1["MLflow 3.16.1: runs tagged data_version + git_commit;<br/>model complaint-router, alias champion;<br/>make reproduce"]
     end
-    subgraph L6["6 Inference"]
-        S1["Real-time: routing API<br/>(FastAPI on Minikube)"]
-        S2["Batch: nightly re-score of the day's<br/>complaints for monitoring"]
+    subgraph L6["6 Inference (Lab 4)"]
+        S1["Routing API on Minikube<br/>loads models:/complaint-router@champion"]
+        S2["Nightly batch re-score for monitoring"]
     end
     CONS["Consumer: routing queues"]
-    subgraph L7["7 Monitoring and retraining loop"]
-        M1["Prometheus + Grafana: latency, errors,<br/>fallback rate, queue mix"]
-        M2["Evidently daily: text and prediction drift;<br/>macro-F1 once labels arrive (15–60 days)"]
+    subgraph L7["7 Monitoring and retraining loop (Lab 4)"]
+        M1["Prometheus + Grafana"]
+        M2["Evidently: text and prediction drift;<br/>macro-F1 once labels arrive"]
         M3["Alert → ML engineer (Telegram)"]
     end
 
-    I1 --> V --> P1 --> P2 --> Q
-    Q --> F1
-    F1 -- "materialise" --> F2
-    F1 -- "training path (offline)" --> T1
-    T1 -- evaluate --> R1
+    I0 --> V --> I1 --> Q1 --> P1 --> P2 --> F0 --> Q2
+    F0 --> F1
+    F1 -- "materialize" --> F2
+    V -- "training path (offline)" --> T1
+    T1 -- "log + register" --> R1
     R1 -- "by alias" --> S1
     R1 -- "by alias" --> S2
     F2 -- "serving path (online)" --> S1
     S1 --> CONS
-    S1 -- "requests, predictions" --> M1
-    S1 -- "logged inputs + predictions" --> M2
+    S1 --> M1
+    S1 --> M2
     S2 --> M2
     M1 --> M3
     M2 --> M3
     M3 -- "trigger retraining" --> T1
 ```
+
+**Changed from the Lab 1 plan.**
+- The raw batch is versioned as Parquet files in the repository's DVC workspace and loaded into a PostgreSQL `raw` schema, not written to a MinIO `raw/` prefix. One store fewer, and the DVC md5 already identifies the bytes.
+- Training reads the DVC files and recomputes the warehouse tables with the same functions instead of reading the warehouse. A run then depends only on (data version, commit), so `make reproduce` works without replaying the whole pipeline. The two paths were checked to give identical rows and features.
+- The Feast offline store is the PostgreSQL feature table, not Parquet on MinIO.
 
 The narrative is not stored in the feature store: it arrives with the request. The vectorizer and `scrub_pii()` ship inside the registered model, so the training and serving paths run the same code on the text.
 
@@ -346,17 +365,19 @@ flowchart TB
 
 | Component | Local (pinned) | AWS | GCP | Azure |
 |---|---|---|---|---|
-| Object storage, data lake | MinIO-compatible `pgsty/silo` | Amazon S3 | Cloud Storage | Blob Storage |
-| Data versioning remote | DVC 3.67.1 + dvc-s3 3.3.0 on MinIO | S3 remote | GCS remote | Azure Blob remote |
-| Warehouse / serving DB | PostgreSQL 16 | Amazon RDS | Cloud SQL | Azure Database for PostgreSQL |
-| Orchestrator | Apache Airflow 3.3.1, LocalExecutor | Amazon MWAA | Cloud Composer | Azure Data Factory |
-| Experiment tracking, registry | MLflow 3.16.1 (PostgreSQL backend, MinIO artifacts) | SageMaker with MLflow | Vertex AI Experiments + Model Registry | Azure ML with MLflow |
-| Feature store | Feast 0.66.0 (offline: Parquet on MinIO; online: PostgreSQL) | SageMaker Feature Store | Vertex AI Feature Store | Azure ML managed feature store |
+| Object storage, data lake | MinIO-compatible `pgsty/silo:RELEASE.2026-09-16T00-00-00Z`; buckets `dvc`, `mlflow` | Amazon S3 | Cloud Storage | Blob Storage |
+| Data versioning remote | DVC 3.67.1 + dvc-s3 3.3.0, remote `s3://dvc/complaint-routing` on MinIO | S3 remote | GCS remote | Azure Blob remote |
+| Warehouse / serving DB | PostgreSQL 16, one instance, databases `warehouse` (schemas `raw`, `dwh`, `features`, `feast_online`), `airflow`, `mlflow` | Amazon RDS | Cloud SQL | Azure Database for PostgreSQL |
+| Orchestrator | Apache Airflow 3.3.1 (`apache/airflow:3.3.1-python3.12`, `airflow standalone`), LocalExecutor, DAG `complaints_etl` | Amazon MWAA | Cloud Composer | Azure Data Factory |
+| Experiment tracking, registry | MLflow 3.16.1 (image built from `python:3.12-slim`, no official 3.16.1 image), PostgreSQL backend, MinIO artifacts proxied by the server | SageMaker with MLflow | Vertex AI Experiments + Model Registry | Azure ML with MLflow |
+| Feature store | Feast 0.66.0, separate environment in `feature_repo/` (it needs pandas < 3); offline and online store: PostgreSQL | SageMaker Feature Store | Vertex AI Feature Store | Azure ML managed feature store |
 | Container registry | Minikube built-in registry | Amazon ECR | Artifact Registry | Azure Container Registry |
 | Kubernetes cluster | Minikube 1.33.1 (K8s 1.30.0, docker driver, 4 GB) | Amazon EKS | GKE | AKS |
 | Model and data monitoring | Evidently | SageMaker Model Monitor | Vertex AI Model Monitoring | Azure ML model monitoring |
 | Metrics and dashboards | Prometheus, Grafana | Amazon CloudWatch | Cloud Monitoring | Azure Monitor |
 | Vector store, LLM (Lab 3) | pgvector 0.8.7 / LLM API | OpenSearch Serverless / Amazon Bedrock | Vertex AI Vector Search / generative AI | Azure AI Search / Azure OpenAI |
+
+Lab 2 runs layers 1–5 with `docker compose` (`make up`): PostgreSQL, MinIO (+ a one-shot bucket-creating `amazon/aws-cli` container), MLflow and Airflow. The pipeline, training and Feast share one pandas version (3.0.5, the one in the Airflow image) except Feast, which runs in its own environment.
 
 ### 6.3 Performance
 
@@ -375,12 +396,19 @@ flowchart TB
   - on Minikube, Kubernetes Secrets;
   - in the cloud, AWS Secrets Manager or its equivalent.
   - Nothing secret is committed.
+- **As built in Lab 2.**
+  - `.env` is git-ignored; `.env.example` holds local-only placeholder values. The Makefile exports `.env`, so DVC and MLflow clients read the MinIO keys from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`; `.dvc/config` holds only the bucket URL and endpoint.
+  - Every container port is published on `127.0.0.1` only (Airflow 8080, MLflow 5050, MinIO 9310/9311, PostgreSQL 5433).
+  - Airflow runs with the simple auth manager in all-admins mode (no login) — acceptable only because it is bound to localhost; a shared deployment needs real users.
+  - MLflow restricts the `Host` header (`--allowed-hosts`), which blocks DNS-rebinding requests from a browser.
 - **Who may call.** Only the intake service may call the routing API, with a service token; the API is not exposed outside the cluster. MLflow, Airflow and Grafana are available on localhost only.
 
 ### 6.5 Data privacy
 
 - **Training data.** The training data is public (CC0). Narratives are scrubbed of PII by the CFPB (`XXXX`), but they still describe personal financial situations. ZIP codes are truncated in the source, and tags such as "Older American" or "Servicemember" are sensitive attributes.
 - **Serving data.** Serving requests in the intake scenario contain raw PII (names, account numbers). `scrub_pii()` runs before anything is logged; the prediction log stores only scrubbed text.
+- **`scrub_pii()` as built** (`src/complaint_routing/transform.py`): masks e-mail addresses, phone numbers and any run of ≥ 6 digits (account, card and SSN-like numbers) with `XXXX`, the CFPB's own mask. It runs in `transform`, so `dwh.complaints`, the features and the model all see scrubbed text; `raw.complaints` keeps the archive text as published (already scrubbed by the CFPB, CC0).
+- **What is stored where in Lab 2.** Public CFPB text only: the DVC remote and `raw`/`dwh` schemas hold the 82,500-row sample, MLflow stores three example rows as the model's input example. No request data exists yet.
 - **Retention.**
   - Raw batches: as long as a registered model depends on them (lineage).
   - Prediction logs: 90 days.
@@ -396,7 +424,7 @@ flowchart TB
 | Text drift: narrative length, vocabulary (share of out-of-vocabulary tokens) | Evidently, daily | OOV share > 1.5 × reference, or a length-distribution drift test fails | ML engineer |
 | Confidence: share of predictions with max probability < 0.5 | Evidently, daily | > 2 × reference | ML engineer |
 | Macro-F1 and per-queue recall on labelled complaints | Airflow eval task, weekly, on complaints closed in the past week (received 15–60 days earlier) | macro-F1 drops > 0.05 vs test, or any queue recall < 0.60 | ML engineer → retraining decision |
-| Upstream schema and freshness: null-narrative share, unknown products, rows per batch | Quality gate in `ingest_month` | null narratives > 5 %, any unknown product, or a row count equal to the previous run (stale partition) | ML engineer; the DAG fails |
+| Upstream schema and freshness: null-narrative share, unknown products, rows per batch | Quality gate: task `validate` of `complaints_etl` (built in Lab 2) | null narratives > 5 %, any unknown product, a date outside the batch month, < 500 rows, or a file identical to the previous month's (stale partition). The sample has a fixed 1,500 rows per month, so an equal row count would not mean stale | ML engineer; the DAG fails |
 
 The 2026-08-14 narrative cutoff is exactly the event the last row exists for: the null-narrative share of the live API batch jumps to 100 %. The gate stops the batch from reaching training, and the monitoring falls back to queue-mix tracking on structured data.
 
@@ -440,8 +468,14 @@ Two columns:
 ### 6.8 Integration points
 
 - **Upstream: CFPB (archive and API).**
-  - Contract: archive ZIP exports in the classic database schema. API JSON documents with `complaint_id`, `date_received`, `product`, `company`, … as of 2026-10-19.
-  - No contract with the CFPB is possible: schema changes are detected by the quality gate.
+  - Contract: archive ZIP exports in the classic database schema (16 columns, checked on all 18 files used). API JSON documents with `complaint_id`, `date_received`, `product`, `company`, … as of 2026-10-19.
+  - No contract with the CFPB is possible: schema changes are detected by the quality gate (`validate`: missing columns, unknown products, dates outside the batch, a file identical to the previous month's).
+  - The download host rejects requests with a browser-like `User-Agent` but no browser headers (HTTP 403 from the CDN); `ingest.py` sends a plain client agent.
+- **Between our own components (Lab 2).**
+  - DVC data: `data/raw.dvc` (md5 + the remote `s3://dvc/complaint-routing`). Anything that reads raw data identifies it by that md5.
+  - Pipeline → warehouse: one partition per `batch_month` in `raw.complaints`, `dwh.complaints`, `features.complaint_features`; a rerun replaces the partition.
+  - Pipeline → Feast: `features.complaint_features` with `company`, `event_timestamp`, `mix_*`, `feature_version`.
+  - Training → registry: model `complaint-router`, tags `data_version`, `git_commit`, `feature_version`, `mapping_version`; consumers load `models:/complaint-router@champion`. Clients outside Docker set `MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD=false`, because presigned URLs name `minio:9000`, which only resolves inside the compose network.
 - **Upstream: case closure (labels).**
   - Contract: `{complaint_id, final_queue, closed_at}`, delivered daily.
   - **Assumption:** in the replayed data, `final_queue` is the mapped `product`, available 60 days after `date_received` (the conservative end of the observed delay).
@@ -461,7 +495,7 @@ Two columns:
 | Taxonomy changes break the mapping | Versioned mapping table plus the "unknown product" gate check |
 | Training–serving skew in PII scrubbing (CFPB's scrubber vs our `scrub_pii()`) | Run `scrub_pii()` on archive text as well, so both paths see the same masks; a test compares the `XXXX` share across paths |
 | Leakage through issue or sub-product fields, or through future company stats | Fields are whitelisted per the table in 5.2; Feast point-in-time joins |
-| Archive schema differs from the assumption | Checked on the first file in Lab 2; the schema normaliser in layer 2 absorbs it |
+| Archive schema differs from the assumption | Checked in Lab 2: all 18 files used have the 16-column schema; `validate` fails any batch with a missing column before it is loaded |
 
 ## 7 Appendix
 
@@ -477,7 +511,20 @@ Two columns:
 
 ### 7.2 Experiment results
 
-Placeholder: filled in Lab 2 (baselines vs candidate on the held-out months, from MLflow).
+From the MLflow experiment `complaint-routing` (data version `835e7d9b…dir`, commit `4a2c1f3`). Train 2022-01 → 2026-02 (64,269 complaints), validation 2026-03 → 04 (2,856), test 2026-05 → 07 (4,294).
+
+| Run | val macro-F1 | test macro-F1 | test accuracy | test min recall | test accuracy re-weighted to the intake mix (5.4) |
+|---|---|---|---|---|---|
+| baseline-majority (always `credit_reporting`) | 0.006 | 0.008 | 0.042 | 0.000 | 0.914 |
+| baseline-keywords | 0.502 | 0.524 | 0.523 | 0.186 | 0.764 |
+| **candidate-tfidf-logreg** (registered v1, `champion`) | **0.754** | **0.776** | **0.830** | 0.270 | 0.869 |
+
+Test recall per queue of the candidate: mortgage 0.94, student loan 0.92, credit reporting 0.87, debt collection 0.86, vehicle loan 0.84, card 0.81, checking/savings 0.81, money transfer 0.77, personal loan 0.72, **debt management 0.27** (37 test complaints).
+
+What this says:
+- The model beats both rules on macro-F1 by a wide margin, and every queue but one passes the 0.60 recall target. `debt_management` misses it: it is 0.1 % of training rows, so class weights alone do not fix it. The promotion rule (5.4) would block a model like this today; v1 is registered as `champion` only because it is the first model.
+- The re-weighted accuracy ranks the majority rule first (0.914), because 91.4 % of all complaints in the test months are credit reporting. This is the selection-bias problem of 5.2 in one number, and the reason accuracy is not a target (3).
+- `make reproduce` retrained v1 from its tags in a clean worktree: test macro-F1 0.7762 → 0.7762.
 
 ### 7.3 Performance benchmarks
 
@@ -485,7 +532,7 @@ Placeholder: filled in Lab 4 (routing API p50/p95 under load, Feast lookup laten
 
 ### 7.4 Milestones
 
-- **Lab 2.** Airflow ingests the archive month by month into MinIO with DVC versions and the quality gate. The time split, baselines and the candidate are tracked and registered in MLflow with data version and commit.
+- **Lab 2 (done).** A DVC-versioned monthly sample of the archive (remote on MinIO); Airflow DAG `complaints_etl` loads it month by month into PostgreSQL with a quality gate and builds the feature table (Feast on top). The time split, two rule baselines and the candidate are tracked in MLflow with data version and commit; v1 is registered as `champion` and reproduced with one command.
 - **Lab 3.** An LLM complaint assistant retrieves similar past complaints and the relevant CFPB product and regulation documents, explains the routing decision with citations, and is evaluated on a fixed question set for retrieval and answer quality.
 - **Lab 4.** The routing API and monitoring run on Minikube. Replaying 2026-08, or an injected shift in queue mix and vocabulary, crosses a drift threshold, and the alert reaches the ML engineer.
 - **Lab 5.** An agent uses the system's tools (routing API, monitoring metrics, MLflow, the assistant) to triage a batch of complaints and explain a drift alert.

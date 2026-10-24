@@ -21,7 +21,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres/init.sh:/docker-entrypoint-initdb.d/init.sh:ro
-    ports: ["5433:5432"]
+    ports: ["127.0.0.1:5433:5432"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
@@ -34,7 +34,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes: [miniodata:/data]
-    ports: ["9010:9000", "9011:9001"]
+    ports: ["127.0.0.1:9310:9000", "127.0.0.1:9311:9001"]
 
   minio-init:  # creates the buckets once, then exits
     image: amazon/aws-cli:2.31.18
@@ -62,7 +62,7 @@ services:
       --backend-store-uri postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow
       --artifacts-destination s3://mlflow --serve-artifacts
       --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*"
-    ports: ["5050:5000"]
+    ports: ["127.0.0.1:5050:5000"]
 
   airflow:
     image: apache/airflow:3.3.1-python3.12
@@ -75,7 +75,7 @@ services:
       - ./src:/opt/project/src:ro
       - ./config:/opt/project/config:ro
       - ./data:/opt/project/data:ro
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
 
 volumes:
   pgdata:

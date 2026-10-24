@@ -52,6 +52,13 @@ def main() -> None:
     result = Path(tempfile.mkdtemp(prefix="repro-result-")) / "result.json"
     run(["git", "worktree", "add", "--detach", str(workdir), commit], cwd=ROOT)
     try:
+        # Where the remote lives is infrastructure, not lineage: the data hash comes from the
+        # commit, the remote address from today's config (it moved since some commits were made).
+        endpoint = subprocess.check_output(
+            ["uv", "run", "dvc", "config", "remote.minio.endpointurl"], cwd=ROOT, text=True
+        ).strip()
+        run(["uv", "run", "--frozen", "dvc", "remote", "modify", "--local", "minio",
+             "endpointurl", endpoint], cwd=workdir)  # fmt: skip
         run(["uv", "run", "--frozen", "dvc", "pull", "data/raw.dvc"], cwd=workdir)
         pulled = lineage.data_version(workdir / "data" / "raw.dvc")
         if pulled != data:

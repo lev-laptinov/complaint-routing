@@ -3,4 +3,4 @@
     remote = minio
 ['remote "minio"']
     url = s3://dvc/complaint-routing
-    endpointurl = http://localhost:9010
+    endpointurl = http://localhost:9310

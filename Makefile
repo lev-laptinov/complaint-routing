@@ -18,7 +18,7 @@ test:
 
 up:  ## PostgreSQL, MinIO, MLflow, Airflow
 	docker compose up -d --build
-	@echo "Airflow http://localhost:8080  MLflow http://localhost:5050  MinIO http://localhost:9011"
+	@echo "Airflow http://localhost:8080  MLflow http://localhost:5050  MinIO http://localhost:9311"
 
 down:
 	docker compose down
