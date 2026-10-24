@@ -1,0 +1,11 @@
+queue,share
+credit_reporting,0.914305
+debt_collection,0.041965
+card,0.013043
+checking_savings,0.011936
+money_transfer,0.005085
+mortgage,0.004608
+vehicle_loan,0.003216
+student_loan,0.002680
+personal_loan,0.002568
+debt_management,0.000594

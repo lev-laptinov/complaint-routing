@@ -1,0 +1,9 @@
+[project]
+name = "complaint-routing-features"
+version = "0.1.0"
+description = "Feast feature repository (separate env: Feast 0.66 needs pandas < 3)"
+requires-python = ">=3.12,<3.13"
+dependencies = ["feast[postgres]==0.66.0"]
+
+[tool.uv]
+package = false

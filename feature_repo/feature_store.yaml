@@ -1,0 +1,22 @@
+project: complaint_routing
+provider: local
+registry: data/registry.db
+offline_store:  # reads features.complaint_features, the table the Airflow DAG fills
+  type: postgres
+  host: localhost
+  port: 5433
+  database: warehouse
+  db_schema: features
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+  sslmode: disable  # local container
+online_store:  # Lab 4 serving reads from here
+  type: postgres
+  host: localhost
+  port: 5433
+  database: warehouse
+  db_schema: feast_online
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+  sslmode: disable  # local container
+entity_key_serialization_version: 3
