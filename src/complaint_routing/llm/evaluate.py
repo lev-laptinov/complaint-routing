@@ -155,8 +155,13 @@ def evaluate(cfg: dict, retrieval_only: bool, run_name: str | None, overrides: l
         "corpus_version": params["corpus_version"],
     } | ({} if retrieval_only else prompts)
     mlflow.set_experiment(EXPERIMENT)
+
+    def short(o: str) -> str:  # "retrieval.embedding_model=BAAI/x" -> "embedding_model=x"
+        key, _, value = o.partition("=")
+        return f"{key.split('.')[-1]}={value.split('/')[-1]}"
+
     name = run_name or ("retrieval" if retrieval_only else "rag") + (
-        "-" + "-".join(o.split(".")[-1] for o in overrides) if overrides else ""
+        "-" + "-".join(short(o) for o in overrides) if overrides else ""
     )
     with mlflow.start_run(run_name=name, tags=tags) as run:
         mlflow.log_params(params)

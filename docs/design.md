@@ -1,6 +1,6 @@
 # Complaint routing — design document
 
-> Status: Lab 2. Sections 5.2–5.4, 6.1, 6.2, 6.4, 6.5, 6.8 and 7.2 now describe what is built and measured; statements still marked **Assumption** are decisions taken without data yet.
+> Status: Lab 3. Sections 5.1, 5.3, 5.4, 6.1, 6.3, 6.7, 7.1 and 7.2 now also describe the LLM component (LLM routing baseline, retrieval assistant) as built and measured; statements still marked **Assumption** are decisions taken without data yet.
 > Section numbers follow the [ml-design-docs](https://github.com/eugeneyan/ml-design-docs) template and must not change.
 
 ## 1 Overview
@@ -104,7 +104,7 @@ Accuracy is deliberately not a target. Among all complaints, credit reporting is
 **The corpus: Ask CFPB, the CFPB's consumer Q&A** (consumerfinance.gov/ask-cfpb).
 - One page per question, grouped in categories that mirror the complaint products: debt collection, credit reports and scores, mortgages, bank accounts, credit cards, auto loans, student loans, payday loans, money transfers, prepaid cards.
 - Each page explains what the law requires (FCRA, FDCPA/Regulation F, Regulation E, Regulation Z), in plain language: what an analyst needs to judge a complaint.
-- Every English answer listed in the site's sitemap.xml, **673 pages**, fetched on 2026-11-07 into one JSONL snapshot (`data/corpus/ask_cfpb.jsonl`, committed). Public: a US federal government work, no copyright.
+- Every English answer listed in the site's sitemap.xml: 673 pages fetched on 2026-11-07, of which **656** have an answer of at least 200 characters, 211,230 words in total (median 261 words per page). One JSONL snapshot, `data/corpus/ask_cfpb.jsonl` (1.5 MB, committed, md5 `f9e1907f…`). Public: a US federal government work, no copyright.
 - The snapshot, not the live site, is the corpus version: its md5 is logged on every run, and `make corpus` re-fetches it (which produces a new version).
 - This replaces the Lab 1 plan of regulation summaries plus past narratives. Regulation text (eCFR) is long and legalistic, while Ask CFPB already summarises it per consumer question. Past narratives have no "relevant document" for a question, so retrieval over them cannot be scored with hit rate.
 
@@ -210,13 +210,13 @@ Some narratives are not complaints at all; for example, a pasted chatbot convers
 |---|---|---|
 | LLM | `Qwen/Qwen2.5-0.5B-Instruct`, fp16, on vLLM 0.30.0 (OpenAI-compatible server, CPU) | the largest model that leaves room for the rest of the stack in 8 GB of Docker memory (6.3, 7.1) |
 | Decoding | temperature 0, max 256 tokens (answers), 10 tokens (queue names), 3 tokens (judge) | deterministic, so a rerun of the same config gives the same answers |
-| LLM baseline prompt | `prompts/classify_v1.txt`: the 10 queues with a one-line definition each, the narrative cut to 2,000 characters, "answer with the queue name only" | zero-shot: no labelled examples, so it works for a queue that has none yet |
-| Chunking | sliding window over words, **120 words, overlap 20** | an Ask CFPB answer is 100–1,000 words; 120 words is one or two paragraphs (sweep in 7.2) |
-| Embedding model | `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, CPU) | small and fast enough to embed ~5,000 chunks in about a minute on a laptop CPU |
+| LLM baseline prompt | `prompts/classify_v2.txt`: the narrative (cut to 2,000 characters) first, then the 10 queue names with their typical products, "reply with the product name only". v1 (queues first, narrative last) made the model answer `credit_reporting` 91 % of the time | zero-shot: no labelled examples, so it works for a queue that has none yet |
+| Chunking | sliding window over words, **120 words, overlap 20** → 2,300 chunks | an Ask CFPB answer has a median of 261 words (90th percentile 614); 120 words is one or two paragraphs (sweep in 7.2) |
+| Embedding model | `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, CPU) | the whole index (2,300 chunks) builds in 57 s on the laptop CPU; best hit rate@1 and MRR of the three models tried (7.2) |
 | Vector index | pgvector 0.8.7 in the existing PostgreSQL 16 (`warehouse`, schema `rag`), exact cosine search | one database fewer than Qdrant (7.1); a few thousand chunks need no approximate index |
 | Retrieval | top-k = **5** chunks | |
 | Answer prompt | `prompts/rag_answer_v1.txt`: answer from the excerpts only, 2–4 sentences, cite `[ask-<id>]`, say "The documents do not answer this." otherwise | citations make "the answer cites a document the retriever never returned" measurable |
-| Judge prompt | `prompts/judge_v1.txt`: does the candidate state the same key fact as the reference? YES/NO | binary verdicts are easier to check by hand than a 1–5 scale |
+| Judge prompt | `prompts/judge_v1.txt`: does the candidate state the same key fact as the reference? YES/NO | binary verdicts are easier to check by hand than a 1–5 scale. Measured: it agrees with the hand rubric on 39 % of answers, so the hand rubric is the answer metric of record (5.4, 7.2) |
 
 The index is keyed by an **index version**: hash of (corpus md5, chunk size, overlap, embedding model). Indexes for different settings live side by side in `rag.chunks`, so an experiment never overwrites the served index, and the query path refuses to run when the index for the current config and corpus has not been built.
 
@@ -263,7 +263,9 @@ Two features have a serving-time source that differs from the training-time sour
   - Relevance is labelled **per document, not per chunk**: chunk ids change with the chunk size, and the sweep must be scored against the same labels. A second relevant document is listed when another page answers the same question (Ask CFPB has near-duplicates, e.g. two pages on cancelling a money transfer).
 - **Retrieval metrics** (our code, `llm/metrics.py`): hit rate@k (share of questions with a chunk of a relevant document in the top k) and MRR@10 (mean of 1 / rank of the first such chunk), from the top 10 chunks.
 - **Answer metric:** `answer_correct`, the share of questions where an LLM judge (`prompts/judge_v1.txt`, hashed like any prompt) says the answer states the same key fact as the reference. Also logged: refusal rate, citation rate, and `cited_outside_retrieved_rate` (the answer cites a document id the retriever did not return: a hallucinated citation).
-- **The judge is checked by hand**, because it can be wrong in two ways: it can accept a fluent answer that misses the key fact (false YES), or reject a correct answer phrased differently (false NO). The judge is the same 0.5B model that wrote the answers, which also biases it towards its own phrasing. Agreement with a hand-graded sample is in 7.2.
+- **The judge is checked by hand**, because it can be wrong in two ways: it can accept a fluent answer that misses the key fact (false YES), or reject a correct answer phrased differently (false NO). The judge is the same 0.5B model that wrote the answers, which also biases it towards its own phrasing.
+- **Hand rubric (the answer metric of record).** Correct = a reader learns the key fact of the reference answer, without a contradiction. Applied to every third question (19 per configuration) in `eval/hand_grades.csv`, each grade keyed by the sha256 of the graded answer text, so `evaluate` counts a grade only for that exact answer and logs `answer_correct_hand`, `hand_graded_n` and `judge_agreement_hand` on the run. Measured: judge v1 agrees with the rubric on 22 of 57 graded answers (33 false YES, 2 false NO); a stricter judge v2 says NO to every answer. Neither is usable at 0.5B (7.2).
+- **Bias from a generated evaluation set.** The questions were written by a different and much larger model (Claude) than the one that answers (Qwen2.5-0.5B), which avoids the worst case of a model grading its own phrasing; the remaining bias is that generated questions follow the documents' structure. Mitigation: questions rephrased as complaint situations, reference answers checked by hand against the documents.
 - **One parameter at a time.** The served settings are the baseline; a sweep changes one of chunk size, embedding model or top-k across ≥ 3 values, every run logged with its index version and hashes; results in 7.2.
 
 ### 5.5 Human in the loop
@@ -374,10 +376,10 @@ flowchart LR
     CFG(("config/llm.yaml<br/>chunk_size 120, overlap 20<br/>all-MiniLM-L6-v2<br/>top_k 5"))
     subgraph ING["Ingestion: make rag-index"]
         direction LR
-        C["Corpus<br/>Ask CFPB snapshot, 673 pages<br/>data/corpus/ask_cfpb.jsonl"]
+        C["Corpus<br/>Ask CFPB snapshot, 656 pages<br/>data/corpus/ask_cfpb.jsonl"]
         CH["Chunk<br/>120 words, overlap 20"]
         E["Embed<br/>all-MiniLM-L6-v2, CPU"]
-        IX["Index: pgvector 0.8.7<br/>warehouse.rag.chunks<br/>keyed by index version"]
+        IX["Index: pgvector 0.8.7<br/>warehouse.rag.chunks, 2,300 chunks<br/>keyed by index version"]
         C --> CH --> E --> IX
     end
     subgraph QRY["Query path: make rag-ask / rag-eval"]
@@ -447,7 +449,9 @@ flowchart TB
 | Kubernetes cluster | Minikube 1.33.1 (K8s 1.30.0, docker driver, 4 GB) | Amazon EKS | GKE | AKS |
 | Model and data monitoring | Evidently | SageMaker Model Monitor | Vertex AI Model Monitoring | Azure ML model monitoring |
 | Metrics and dashboards | Prometheus, Grafana | Amazon CloudWatch | Cloud Monitoring | Azure Monitor |
-| Vector store, LLM (Lab 3) | pgvector 0.8.7 / LLM API | OpenSearch Serverless / Amazon Bedrock | Vertex AI Vector Search / generative AI | Azure AI Search / Azure OpenAI |
+| Vector store (Lab 3) | pgvector 0.8.7 in the same PostgreSQL 16 (`pgvector/pgvector:0.8.7-pg16-trixie`, schema `rag`) | OpenSearch Serverless vector search | Vertex AI Vector Search | Azure AI Search |
+| LLM inference (Lab 3) | vLLM 0.30.0, OpenAI-compatible server, CPU image built from source (`vllm-cpu-arm64:0.30.0`), `Qwen/Qwen2.5-0.5B-Instruct` fp16; compose profile `llm`, `127.0.0.1:8000` | Amazon Bedrock | Vertex AI generative AI | Azure OpenAI |
+| Embedding model (Lab 3) | sentence-transformers `all-MiniLM-L6-v2`, CPU, in the client process | Bedrock embeddings | Vertex AI embeddings | Azure OpenAI embeddings |
 
 Lab 2 runs layers 1–5 with `docker compose` (`make up`): PostgreSQL, MinIO (+ a one-shot bucket-creating `amazon/aws-cli` container), MLflow and Airflow. The pipeline, training and Feast share one pandas version (3.0.5, the one in the Airflow image) except Feast, which runs in its own environment.
 
@@ -460,6 +464,10 @@ Lab 2 runs layers 1–5 with `docker compose` (`make up`): PostgreSQL, MinIO (+ 
   - Throughput: ≈ 1,000 complaints/day (**Assumption**), about 0.01 req/s on average and ~0.1 req/s at peak. We design for ≥ 5 req/s on one CPU pod.
   - p95 ≤ 300 ms end to end, of which ≤ 50 ms is the Feast online lookup (**Assumption**, measured in Lab 4).
 - **Training.** Batch, monthly, ≤ 30 min on a laptop CPU.
+- **LLM component (Lab 3, measured).** Local inference on CPU: vLLM 0.30.0 in Docker on a MacBook Pro M1 Pro (8 cores, 16 GB; Docker VM 8 CPUs / 8 GB), `Qwen2.5-0.5B-Instruct`, 0.5 B parameters, fp16 (no quantization), no GPU; the server holds 4.9 GB.
+  - Assistant answer (854 tokens in, 85 out): **p50 5.1 s, p95 13.5 s** over 57 calls, cold first call 2.8 s. Routing baseline (418 in, 3 out): p50 1.0 s, p95 1.5 s over 300 calls.
+  - The assistant is used by an analyst reading a complaint, not in the intake path, so a budget of ≤ 15 s p95 per answer is tolerable; the tail comes from long outputs (≈ 14 output tokens/s), and a lower `max_tokens` would cut it. The routing baseline would break the 300 ms routing budget by 5×, one more reason the champion keeps routing.
+  - **Local inference or an API.** We run locally: the analyst's questions (and, for the routing baseline, raw complaint narratives with PII before `scrub_pii()`) never leave the machine; no key; the model cannot be swapped behind its name, so runs are reproducible. The price is answer quality (26 % correct by the hand rubric at the served settings), 5–13 s per answer, and 4.9 GB of an 8 GB Docker VM, which forces Airflow off while vLLM runs. An API would answer better and faster for cents, at the cost of privacy and reproducibility; switching is a change to `config/llm.yaml` (7.1).
 
 ### 6.4 Security
 
@@ -530,8 +538,14 @@ Two columns:
 | SageMaker Feature Store | 0.05 M writes + 0.03 M reads, 0.01 GB | $1.525 / M writes, $0.305 / M reads | 0.09 | 0.09 |
 | SageMaker training | 1 job × 30 min, ml.m5.large | $0.138 / h | 0.07 | 0.07 |
 | **Subtotal (calculator)** | | | **1,131.95** | **171.14** |
-| LLM API (Lab 3) | ≈ 50 k tokens/day; not priced until the model is chosen | | 10 | 10 |
-| **Total** | | | **≈ 1,142** | **≈ 181** |
+| LLM (Lab 3) | self-hosted vLLM on the same node; see below | | 0 | 0 |
+| **Total** | | | **≈ 1,132** | **≈ 171** |
+
+**LLM cost, measured from our own runs (Lab 3).** Local inference has no per-request price; it costs compute and memory:
+- per assistant answer: **5.9 s** of the 8-CPU Docker VM, 854 input + 85 output tokens; per judge call 0.65 s; per routing call 1.05 s (418 + 3 tokens);
+- a full 57-question evaluation: 338 s of answering + 37 s of judging; the 300-complaint routing baseline: 316 s;
+- memory: the vLLM server holds **4.9 GB** while running, the embedding model and pgvector well under 1 GB for 2,300 chunks.
+- On the lean EKS column this does not fit on the t3.large node (8 GB) next to the rest; it would need its own node or an API. The API alternative was not run (7.1), so its per-request price is not measured here.
 
 **What the numbers say**
 - The two always-on managed control planes are 88 % of the managed bill: the MLflow tracking server is $638 and MWAA is $358. Yet the workload is one training run and a few DAG runs per month.
@@ -603,6 +617,39 @@ What this says:
 - The re-weighted accuracy ranks the majority rule first (0.914), because 91.4 % of all complaints in the test months are credit reporting. This is the selection-bias problem of 5.2 in one number, and the reason accuracy is not a target (3).
 - `make reproduce` retrained v1 from its tags in a clean worktree: test macro-F1 0.7762 → 0.7762.
 
+**Lab 3: the LLM component** (MLflow, commit `369aeba`, corpus md5 `f9e1907f…`, eval set of 57 questions).
+
+LLM routing baseline vs the champion, same 300 seeded test complaints, experiment `complaint-routing`:
+
+| Run | prompt hash | macro-F1 | accuracy | min recall |
+|---|---|---|---|---|
+| LLM zero-shot, `classify_v1` | `4876df1eeccd` | 0.040 | 0.083 | 0.000 |
+| LLM zero-shot, `classify_v2` | `860affc491b5` | 0.339 | 0.330 | 0.000 |
+| champion `complaint-router@champion` | — | **0.829** | **0.850** | 0.588 |
+
+Assistant, chunk size varied (overlap 20, `all-MiniLM-L6-v2`, top-k 5), experiment `complaint-assistant-rag`:
+
+| chunk size (words) | chunks | hit rate@1 | hit rate@5 | hit rate@10 | MRR@10 | answer correct, hand rubric (19 q) | answer correct, judge v1 (57 q) | judge agreement with hand |
+|---|---|---|---|---|---|---|---|---|
+| 60 | 5,275 | 0.351 | 0.649 | 0.807 | 0.507 | 0.421 | 0.807 | 0.53 |
+| **120** | 2,300 | **0.491** | **0.684** | 0.807 | 0.571 | 0.263 | 0.842 | 0.37 |
+| 240 | 1,238 | 0.491 | 0.667 | **0.842** | **0.572** | 0.211 | 0.842 | 0.26 |
+
+Embedding model varied (chunk size 120, retrieval only):
+
+| embedding model | hit rate@1 | hit rate@5 | hit rate@10 | MRR@10 |
+|---|---|---|---|---|
+| **all-MiniLM-L6-v2** | **0.491** | 0.684 | 0.807 | **0.571** |
+| multi-qa-MiniLM-L6-cos-v1 | 0.404 | 0.649 | 0.772 | 0.514 |
+| bge-small-en-v1.5 | 0.421 | **0.772** | **0.860** | 0.559 |
+
+Judge prompt varied (chunk size 120, identical answers): judge v1 `answer_correct` 0.842, judge v2 0.000; hand rubric 0.263 for both.
+
+What this says:
+- Retrieval: 120-word chunks are the best trade-off (60 loses 14 pp of hit rate@1; 240 makes prompts 33 % longer for no gain in MRR). `bge-small` gets the right page into the top 5 more often and is the next candidate.
+- Answers: the 0.5B model, not the retriever, is the bottleneck. At 120 words the right page is in the top 5 for 68 % of questions, yet only 26 % of graded answers are correct; typical failures are a "Yes" where the document says "No" and copying an unrelated excerpt. Shorter context helps it (42 % at 60 words), within the noise of 19 graded questions.
+- The LLM judge is unusable at this size (agreement 26–53 %, almost always YES with v1, always NO with v2). A larger judge (or an API judge) has to be validated against `eval/hand_grades.csv` before it replaces the hand rubric.
+
 ### 7.3 Performance benchmarks
 
 Placeholder: filled in Lab 4 (routing API p50/p95 under load, Feast lookup latency).
@@ -610,6 +657,6 @@ Placeholder: filled in Lab 4 (routing API p50/p95 under load, Feast lookup laten
 ### 7.4 Milestones
 
 - **Lab 2 (done).** A DVC-versioned monthly sample of the archive (remote on MinIO); Airflow DAG `complaints_etl` loads it month by month into PostgreSQL with a quality gate and builds the feature table (Feast on top). The time split, two rule baselines and the candidate are tracked in MLflow with data version and commit; v1 is registered as `champion` and reproduced with one command.
-- **Lab 3.** An LLM complaint assistant retrieves similar past complaints and the relevant CFPB product and regulation documents, explains the routing decision with citations, and is evaluated on a fixed question set for retrieval and answer quality.
+- **Lab 3 (done).** A zero-shot LLM routing baseline is logged next to the Lab 2 runs (macro-F1 0.34 vs the champion's 0.83 on the same 300 test complaints). An analyst assistant answers questions from the Ask CFPB corpus (656 pages, pgvector index, vLLM on CPU), evaluated on 57 questions for hit rate, MRR and a hand-rubric answer metric; one parameter at a time (chunk size, embedding model), every run tracked with config, prompt and index hashes.
 - **Lab 4.** The routing API and monitoring run on Minikube. Replaying 2026-08, or an injected shift in queue mix and vocabulary, crosses a drift threshold, and the alert reaches the ML engineer.
 - **Lab 5.** An agent uses the system's tools (routing API, monitoring metrics, MLflow, the assistant) to triage a batch of complaints and explain a drift alert.
