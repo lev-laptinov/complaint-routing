@@ -14,7 +14,9 @@ x-airflow-env: &airflow-env
 
 services:
   postgres:
-    image: postgres:16
+    # PostgreSQL 16 with the pgvector 0.8.7 extension (Lab 3 retrieval index, schema rag).
+    # Same major version and Debian (trixie) as the postgres:16 image of Lab 2: the volume is reused.
+    image: pgvector/pgvector:0.8.7-pg16-trixie
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -58,7 +60,7 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
     command: >
-      mlflow server --host 0.0.0.0 --port 5000
+      mlflow server --host 0.0.0.0 --port 5000 --workers 1
       --backend-store-uri postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow
       --artifacts-destination s3://mlflow --serve-artifacts
       --allowed-hosts "localhost:*,127.0.0.1:*,mlflow:*"
@@ -77,6 +79,22 @@ services:
       - ./data:/opt/project/data:ro
     ports: ["127.0.0.1:8080:8080"]
 
+  vllm:  # Lab 3 LLM server; started on its own with `make llm-up` (profile llm)
+    image: vllm-cpu-arm64:0.30.0  # built from the v0.30.0 source by `make llm-image`
+    profiles: [llm]
+    command: >
+      ${LLM_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+      --dtype float16 --max-model-len 4096 --max-num-seqs 4
+    environment:
+      VLLM_CPU_KVCACHE_SPACE: "1"  # GB of KV cache
+      VLLM_CPU_OMP_THREADS_BIND: auto
+    shm_size: 1g  # without it the engine fails for lack of shared memory
+    cap_add: [SYS_NICE]
+    security_opt: ["seccomp=unconfined"]
+    volumes: [hfcache:/root/.cache/huggingface]
+    ports: ["127.0.0.1:8000:8000"]
+
 volumes:
   pgdata:
   miniodata:
+  hfcache:

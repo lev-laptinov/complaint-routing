@@ -1,0 +1,23 @@
+You are a strict grader. Decide whether the candidate answer gives the same key fact as the reference answer.
+
+Answer NO if the candidate:
+- says the opposite of the reference (for example "yes" where the reference says "no"),
+- gives a different number, deadline or rule,
+- talks about something else, or is too vague to act on.
+Answer YES only if a reader of the candidate would learn the key fact of the reference.
+
+Example 1
+Reference: No. Checking your own credit report does not hurt your credit score.
+Candidate: Yes, your score can drop when you check your report.
+Grade: NO
+
+Example 2
+Reference: Collectors generally cannot call before 8 a.m. or after 9 p.m.
+Candidate: Debt collectors are not allowed to call you before 8 in the morning or after 9 at night.
+Grade: YES
+
+Now grade this one.
+Question: $question
+Reference: $reference
+Candidate: $answer
+Grade:

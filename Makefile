@@ -1,7 +1,16 @@
 -include .env
 export
+# progress lines of long LLM runs appear as they happen
+export PYTHONUNBUFFERED = 1
 
 MONTH ?= 2026-05
+# The LLM server reads its model name from config/llm.yaml, so serving and evaluation never drift.
+LLM_MODEL := $(shell sed -n 's/^  model: *//p' config/llm.yaml | head -1)
+export LLM_MODEL
+VLLM_VERSION = v0.30.0
+VLLM_SRC ?= $(HOME)/src/vllm
+PARAM ?= retrieval.chunk_size
+VALUES ?= 60,120,240
 AIRFLOW = docker compose exec -T airflow airflow
 PSQL = docker compose exec -T postgres psql -U $(POSTGRES_USER)
 
@@ -71,4 +80,36 @@ train:  ## baselines + candidate, logged with data version and commit; registers
 reproduce:  ## rebuild the champion from its two tags and compare the metric
 	uv run python -m complaint_routing.reproduce --model complaint-router --alias champion
 
+## --- Lab 3: LLM baseline and retrieval ---
+llm-image:  ## vLLM CPU image from source (published ARM64 images exit 132 on Apple Silicon); stop airflow+mlflow first: 4 parallel jobs ran the 8 GB Docker VM out of memory
+	[ -d $(VLLM_SRC) ] || git clone --depth 1 --branch $(VLLM_VERSION) https://github.com/vllm-project/vllm.git $(VLLM_SRC)
+	cd $(VLLM_SRC) && docker build -f docker/Dockerfile.cpu --platform=linux/arm64 --build-arg max_jobs=2 \
+		--tag vllm-cpu-arm64:0.30.0 --target vllm-openai .
+
+llm-up:  ## OpenAI-compatible server on localhost:8000 with the model named in config/llm.yaml
+	docker compose --profile llm up -d vllm
+	@until curl -sf localhost:8000/v1/models >/dev/null; do sleep 5; done; curl -s localhost:8000/v1/models; echo
+
+llm-down:
+	docker compose --profile llm stop vllm
+
+corpus:  ## re-fetch the Ask CFPB snapshot (the committed file is the corpus version; this changes it)
+	uv run python -m complaint_routing.llm.corpus
+
+rag-index:  ## corpus -> chunks -> embeddings -> pgvector, for the settings in config/llm.yaml
+	uv run python -m complaint_routing.llm.index
+
+rag-ask:  ## make rag-ask Q="Can a debt collector call me at work?"
+	uv run python -m complaint_routing.llm.rag "$(Q)"
+
+llm-baseline:  ## zero-shot queue prediction, logged next to the Lab 2 runs with the same metric
+	uv run python -m complaint_routing.llm.classify
+
+rag-eval:  ## retrieval + answer metrics on eval/rag_questions.jsonl, one MLflow run
+	uv run python -m complaint_routing.llm.evaluate
+
+rag-sweep:  ## one parameter, several values: make rag-sweep PARAM=retrieval.chunk_size VALUES=60,120,240
+	uv run python -m complaint_routing.llm.evaluate --sweep $(PARAM)=$(VALUES)
+
+.PHONY: llm-image llm-up llm-down corpus rag-index rag-ask llm-baseline rag-eval rag-sweep
 .PHONY: setup lint test up down data-pull data-push data-rebuild etl-backfill etl-month etl-wait counts bad-batch feast-apply feast-demo feast-materialize population-mix train reproduce

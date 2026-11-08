@@ -1,0 +1,11 @@
+You grade answers to questions about consumer-finance rules. Compare the candidate answer with the reference answer.
+
+Question: $question
+
+Reference answer: $reference
+
+Candidate answer: $answer
+
+Does the candidate answer state the same key fact as the reference answer, without contradicting it? Extra correct detail is fine. A refusal or an answer about something else is wrong.
+
+Reply with one word: YES or NO.

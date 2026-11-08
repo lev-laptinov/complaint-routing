@@ -96,6 +96,18 @@ Accuracy is deliberately not a target. Among all complaints, credit reporting is
 - **Framing.** Multi-class text classification: narrative plus a few structured fields → one routing queue out of about 10. Each complaint has exactly one product, so one label per complaint.
 - **Rejected framing: classify the issue (≈ 80 classes) and derive the queue from it.** It gives finer routing, but most issues have few examples per month. Issue names also change with the taxonomy even more often than products. The extra granularity is not needed to pick a queue.
 
+**The LLM component (Lab 3).** The system already has a model, so the LLM gets two contracts, each with its own metric:
+
+1. **Same task, done by an LLM (the LLM baseline).** Given the narrative, a zero-shot LLM names one of the 10 routing queues. Its metric is the Lab 2 metric, macro-F1 over queues, computed by the same code on the same test months. The champion is scored on exactly the same rows. The question this answers is whether an LLM without training could replace or back up the trained classifier, for example while a new queue has no labels yet.
+2. **An auxiliary job over a corpus: the analyst assistant.** A queue analyst asks a question about the rules or the product behind a complaint ("does the consumer have to dispute with the bureau first?", "how long does a collector have to answer a validation request?"). The assistant retrieves passages from the CFPB's own consumer guidance and answers in 2–4 sentences, citing the document ids. Its metrics are retrieval hit rate and MRR, and an answer-correctness rate graded by an LLM judge against reference answers (5.4). It does not route complaints and does not write to the consumer: a human reads it.
+
+**The corpus: Ask CFPB, the CFPB's consumer Q&A** (consumerfinance.gov/ask-cfpb).
+- One page per question, grouped in categories that mirror the complaint products: debt collection, credit reports and scores, mortgages, bank accounts, credit cards, auto loans, student loans, payday loans, money transfers, prepaid cards.
+- Each page explains what the law requires (FCRA, FDCPA/Regulation F, Regulation E, Regulation Z), in plain language: what an analyst needs to judge a complaint.
+- Every English answer listed in the site's sitemap.xml, **673 pages**, fetched on 2026-11-07 into one JSONL snapshot (`data/corpus/ask_cfpb.jsonl`, committed). Public: a US federal government work, no copyright.
+- The snapshot, not the live site, is the corpus version: its md5 is logged on every run, and `make corpus` re-fetches it (which produces a new version).
+- This replaces the Lab 1 plan of regulation summaries plus past narratives. Regulation text (eCFR) is long and legalistic, while Ask CFPB already summarises it per consumer question. Past narratives have no "relevant document" for a question, so retrieval over them cannot be scored with hit rate.
+
 ### 5.2 Data
 
 **Sources**
@@ -192,6 +204,22 @@ Some narratives are not complaints at all; for example, a pasted chatbot convers
   - It is cheap to train on CPU and fast to serve, and the coefficients are explainable.
   - A fine-tuned small transformer (DistilBERT-class) is a later alternative, used only if the linear model misses the per-queue recall target.
 
+**LLM techniques (Lab 3).** Every setting below is in one file, `config/llm.yaml`, read by the index build, the query path, the evaluation and the Lab 4 service; prompts are files in `prompts/`. The sha256 of the effective config and of each prompt file is logged on every run.
+
+| Setting | Value | Why |
+|---|---|---|
+| LLM | `Qwen/Qwen2.5-0.5B-Instruct`, fp16, on vLLM 0.30.0 (OpenAI-compatible server, CPU) | the largest model that leaves room for the rest of the stack in 8 GB of Docker memory (6.3, 7.1) |
+| Decoding | temperature 0, max 256 tokens (answers), 10 tokens (queue names), 3 tokens (judge) | deterministic, so a rerun of the same config gives the same answers |
+| LLM baseline prompt | `prompts/classify_v1.txt`: the 10 queues with a one-line definition each, the narrative cut to 2,000 characters, "answer with the queue name only" | zero-shot: no labelled examples, so it works for a queue that has none yet |
+| Chunking | sliding window over words, **120 words, overlap 20** | an Ask CFPB answer is 100–1,000 words; 120 words is one or two paragraphs (sweep in 7.2) |
+| Embedding model | `sentence-transformers/all-MiniLM-L6-v2` (384 dimensions, CPU) | small and fast enough to embed ~5,000 chunks in about a minute on a laptop CPU |
+| Vector index | pgvector 0.8.7 in the existing PostgreSQL 16 (`warehouse`, schema `rag`), exact cosine search | one database fewer than Qdrant (7.1); a few thousand chunks need no approximate index |
+| Retrieval | top-k = **5** chunks | |
+| Answer prompt | `prompts/rag_answer_v1.txt`: answer from the excerpts only, 2–4 sentences, cite `[ask-<id>]`, say "The documents do not answer this." otherwise | citations make "the answer cites a document the retriever never returned" measurable |
+| Judge prompt | `prompts/judge_v1.txt`: does the candidate state the same key fact as the reference? YES/NO | binary verdicts are easier to check by hand than a 1–5 scale |
+
+The index is keyed by an **index version**: hash of (corpus md5, chunk size, overlap, embedding model). Indexes for different settings live side by side in `rag.chunks`, so an experiment never overwrites the served index, and the query path refuses to run when the index for the current config and corpus has not been built.
+
 **Features and their serving-time source.**
 
 | Feature | Training-time source | Serving-time source |
@@ -226,6 +254,17 @@ Two features have a serving-time source that differs from the training-time sour
   - no queue's recall drops by more than 5 pp;
   - every queue's recall stays ≥ 0.60;
   - p95 latency in the service load test stays ≤ 300 ms.
+
+**Evaluating the LLM component (Lab 3).**
+- **LLM baseline (routing).** 300 complaints drawn from the test months with a fixed seed (natural queue mix). The LLM and the registered champion are scored on exactly these rows with the Lab 2 metric code (macro-F1, accuracy, recall per queue). A reply that names no queue counts as wrong and is reported as `test_unparsed_rate`. Why a sample: on a laptop CPU one LLM call takes seconds, so the full 4,294-row test set would take hours.
+- **Evaluation set for the assistant.** `eval/rag_questions.jsonl`, **57 questions** spread over all 10 queues, each with 1–2 relevant document ids and a 1–2-sentence reference answer.
+  - The questions were **generated with an LLM (Claude) from the corpus, then read and corrected**: each reference answer was checked against its document.
+  - **No question quotes its document.** Questions describe the situation as an analyst would see it in a complaint ("the agency told her boss…") instead of using the page title or product names ("security freeze", "remittance", "money mule", "payroll card" never appear). A script checked for shared 3-word phrases between each question and its document title; the four hits were generic ("is there a", "a charge on") or were rephrased.
+  - Relevance is labelled **per document, not per chunk**: chunk ids change with the chunk size, and the sweep must be scored against the same labels. A second relevant document is listed when another page answers the same question (Ask CFPB has near-duplicates, e.g. two pages on cancelling a money transfer).
+- **Retrieval metrics** (our code, `llm/metrics.py`): hit rate@k (share of questions with a chunk of a relevant document in the top k) and MRR@10 (mean of 1 / rank of the first such chunk), from the top 10 chunks.
+- **Answer metric:** `answer_correct`, the share of questions where an LLM judge (`prompts/judge_v1.txt`, hashed like any prompt) says the answer states the same key fact as the reference. Also logged: refusal rate, citation rate, and `cited_outside_retrieved_rate` (the answer cites a document id the retriever did not return: a hallucinated citation).
+- **The judge is checked by hand**, because it can be wrong in two ways: it can accept a fluent answer that misses the key fact (false YES), or reject a correct answer phrased differently (false NO). The judge is the same 0.5B model that wrote the answers, which also biases it towards its own phrasing. Agreement with a hand-graded sample is in 7.2.
+- **One parameter at a time.** The served settings are the baseline; a sweep changes one of chunk size, embedding model or top-k across ≥ 3 values, every run logged with its index version and hashes; results in 7.2.
 
 ### 5.5 Human in the loop
 
@@ -326,6 +365,39 @@ flowchart TB
 
 The narrative is not stored in the feature store: it arrives with the request. The vectorizer and `scrub_pii()` ship inside the registered model, so the training and serving paths run the same code on the text.
 
+#### Retrieval pipeline (Lab 3)
+
+Ingestion on top, the query path underneath; every setting comes from one file, `config/llm.yaml`.
+
+```mermaid
+flowchart LR
+    CFG(("config/llm.yaml<br/>chunk_size 120, overlap 20<br/>all-MiniLM-L6-v2<br/>top_k 5"))
+    subgraph ING["Ingestion: make rag-index"]
+        direction LR
+        C["Corpus<br/>Ask CFPB snapshot, 673 pages<br/>data/corpus/ask_cfpb.jsonl"]
+        CH["Chunk<br/>120 words, overlap 20"]
+        E["Embed<br/>all-MiniLM-L6-v2, CPU"]
+        IX["Index: pgvector 0.8.7<br/>warehouse.rag.chunks<br/>keyed by index version"]
+        C --> CH --> E --> IX
+    end
+    subgraph QRY["Query path: make rag-ask / rag-eval"]
+        direction LR
+        Q["Question<br/>analyst, or eval/rag_questions.jsonl"]
+        R["Retrieve top-k<br/>k = 5, exact cosine"]
+        L["LLM: vLLM 0.30.0, CPU<br/>Qwen2.5-0.5B-Instruct<br/>prompts/rag_answer_v1.txt (hashed)"]
+        A["Answer with [ask-id] citations<br/>tokens, latency, hashes<br/>→ MLflow complaint-assistant-rag"]
+        Q --> R --> L --> A
+    end
+    CFG -.-> CH
+    CFG -.-> E
+    CFG -.-> R
+    IX -- "nearest chunks" --> R
+```
+
+The evaluation loop runs the same query path on the question set, computes hit rate@k and MRR from the retrieved chunks and an answer-correctness rate from the judge (`prompts/judge_v1.txt`, hashed), logs one MLflow run, and is repeated with one setting changed at a time (`make rag-sweep`, results in 7.2).
+
+The LLM baseline for routing is a separate, shorter path: test narrative → `prompts/classify_v1.txt` → the same vLLM server → queue name → macro-F1, logged in the Lab 2 experiment `complaint-routing`.
+
 #### Deployment (first draft; Lab 4 replaces it)
 
 Each box names the local component and, in italics, its managed equivalent on AWS / GCP / Azure.
@@ -401,6 +473,7 @@ Lab 2 runs layers 1–5 with `docker compose` (`make up`): PostgreSQL, MinIO (+ 
   - Every container port is published on `127.0.0.1` only (Airflow 8080, MLflow 5050, MinIO 9310/9311, PostgreSQL 5433).
   - Airflow runs with the simple auth manager in all-admins mode (no login) — acceptable only because it is bound to localhost; a shared deployment needs real users.
   - MLflow restricts the `Host` header (`--allowed-hosts`), which blocks DNS-rebinding requests from a browser.
+- **As built in Lab 3.** The vLLM server is published on `127.0.0.1:8000` only and has no key (any key is accepted), which is acceptable only on localhost. `LLM_API_KEY` exists in `.env` so an API provider can be configured without code changes; a key ever committed would be revoked, not deleted from history.
 - **Who may call.** Only the intake service may call the routing API, with a service token; the API is not exposed outside the cluster. MLflow, Airflow and Grafana are available on localhost only.
 
 ### 6.5 Data privacy
@@ -508,6 +581,10 @@ Two columns:
 | News classification on the HuffPost dataset | Simple, small | Frozen in 2022, most data before 2018, labels known immediately (weak monitoring story) | Rejected as the use case |
 | Random train/test split | More test data, simple | Leaks across taxonomy changes and through company features | Rejected (5.4) |
 | Batch routing (hourly) | Simpler serving | Adds delay to every complaint for no cost saving | Rejected (6.3) |
+| **LLM through an API** (OpenAI, Anthropic, Gemini) instead of self-hosted vLLM | Far better answers and judge; seconds less latency; no 8 GB container; pennies per run | Every question and every complaint narrative leaves our machine (raw intake text contains PII before `scrub_pii()`); a key to keep secret and revoke; the provider can change the model behind the same name, so old runs stop being reproducible; cost scales with traffic | **Rejected for Lab 3** (local inference chosen; numbers in 6.3, 6.7). Switching is three lines in `config/llm.yaml` plus a key in `.env`; it is the first fallback if Lab 4 needs better answers |
+| Qdrant instead of pgvector | Dedicated vector store, HNSW and filtering built in, scales further | One more container and backup story; the corpus is a few thousand chunks | Rejected: pgvector in the PostgreSQL we already run (5.3) |
+| Unsloth (4-bit) instead of vLLM | 4-bit models load in a few lines, less memory | Needs an NVIDIA GPU in every case; this laptop has none | Rejected |
+| Larger local model (Qwen2.5-1.5B / 3B) | Better instruction following and judging | 1.5B in fp16 needs ~3 GB of weights plus KV cache: with PostgreSQL, MinIO and MLflow running it does not fit in the 8 GB Docker VM; 2–4× slower on CPU | Deferred; first candidate if more memory or a GPU is available |
 
 ### 7.2 Experiment results
 

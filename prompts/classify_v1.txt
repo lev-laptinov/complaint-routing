@@ -1,0 +1,20 @@
+You route consumer-finance complaints to a review queue. Read the complaint and choose exactly one queue.
+
+Queues:
+- card: credit cards and prepaid cards (fees, charges, rewards, card account problems)
+- checking_savings: checking or savings accounts (deposits, overdrafts, account opening or closing)
+- credit_reporting: credit reports and scores, disputes with Equifax, Experian or TransUnion, identity theft on a report
+- debt_collection: a collector or collection agency pursuing a debt (calls, letters, validation of a debt)
+- debt_management: debt settlement, debt relief, credit repair or credit counseling companies
+- money_transfer: money transfers, wire transfers, payment apps (Zelle, PayPal, Cash App), virtual currency
+- mortgage: mortgages (servicing, escrow, payments, modification, foreclosure)
+- personal_loan: payday loans, title loans, personal or installment loans, cash advances
+- student_loan: federal or private student loans and their servicers
+- vehicle_loan: auto loans and vehicle leases
+
+Complaint:
+"""
+$narrative
+"""
+
+Answer with the queue name only, for example: debt_collection

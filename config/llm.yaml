@@ -1,0 +1,45 @@
+# Every LLM and retrieval setting lives here and nowhere else (design 5.3, 6.1).
+# The index build, the query path, the evaluation and the Lab 4 service all read this file;
+# its hash and the hashes of the prompt files below are logged on every LLM run.
+# One-off overrides for experiments: --set retrieval.chunk_size=60 (logged as the effective value).
+
+llm:
+  # vLLM 0.30.0, OpenAI-compatible server, CPU image built from source (make llm-image, make llm-up).
+  # Swapping to an API means changing these three lines and putting the key in .env.
+  base_url: http://localhost:8000/v1
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  api_key_env: LLM_API_KEY  # vLLM accepts any key; an API provider reads the real one from .env
+  temperature: 0.0
+  max_tokens: 256
+  timeout_s: 300
+
+retrieval:
+  corpus: data/corpus/ask_cfpb.jsonl
+  chunk_size: 120  # words per chunk
+  chunk_overlap: 20  # words shared by consecutive chunks
+  embedding_model: sentence-transformers/all-MiniLM-L6-v2
+  top_k: 5
+  db_url_env: RAG_DB_URL  # PostgreSQL 16 + pgvector 0.8.7 (database warehouse, schema rag)
+
+prompts:
+  classify: prompts/classify_v2.txt  # v1 answered credit_reporting 91 % of the time (README, Lab 3, 3)
+  answer: prompts/rag_answer_v1.txt
+  judge: prompts/judge_v1.txt
+
+classify:
+  max_narrative_chars: 2000  # longer narratives are cut; the median is ~1,050 characters
+  max_tokens: 10
+  sample_size: 300  # random test complaints (seeded) scored by the LLM and the champion alike
+  seed: 42
+
+judge:
+  # Same server and model as the answers unless set; see design 5.4 for the self-judging bias.
+  model: null
+  max_tokens: 3
+
+evaluation:
+  questions: eval/rag_questions.jsonl
+  max_k: 10  # retrieval metrics are computed from the top 10 chunks
+  # Hand rubric (design 5.4): grades keyed by (qid, sha256 of the answer text), so a grade only
+  # counts for the exact answer it was given to; a changed answer drops out of the sample.
+  hand_grades: eval/hand_grades.csv

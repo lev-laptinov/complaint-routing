@@ -1,0 +1,18 @@
+Complaint from a consumer:
+"""
+$narrative
+"""
+
+Which financial product is this complaint mainly about? Pick one:
+mortgage - home loan, escrow, foreclosure
+vehicle_loan - car loan or lease, repossession
+student_loan - student loan or its servicer
+personal_loan - payday, title or installment loan
+debt_collection - a collector demanding payment of a debt
+debt_management - debt settlement, debt relief or credit repair company
+money_transfer - Zelle, PayPal, Cash App, wire transfer, crypto
+card - credit card or prepaid card
+checking_savings - bank account, deposit, overdraft, debit card
+credit_reporting - errors on a credit report from Equifax, Experian or TransUnion
+
+Reply with the product name only.

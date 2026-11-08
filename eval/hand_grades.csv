@@ -1,0 +1,58 @@
+chunk_size,qid,answer_sha,hand_correct,judge_v1,note
+120,q01,f42d3c54b25c,1,1,
+120,q04,5c9f979b043b,0,1,suggests a CFPB complaint instead of a stop-contact request
+120,q07,35e12531fe4b,0,1,says the collector can threaten arrest (opposite)
+120,q10,f3bf32678c13,1,1,
+120,q13,159f6f213682,0,1,contact the lender / servicemember office; no dispute with the bureau
+120,q16,ce78e7147d6c,0,0,"starts with Yes, then says it does not affect: contradicts itself"
+120,q19,5c93a083ad9b,0,1,says a company cannot refuse (opposite)
+120,q22,4984ab8d88dd,0,1,names the big three as the specialty agencies
+120,q25,4f9fbfe99b00,0,0,says a grace period is required (opposite)
+120,q28,44520a9ac3f5,1,0,
+120,q31,6eb1c1044af7,0,1,contact the bank but no stop-payment order
+120,q34,885de395f587,1,1,
+120,q37,c346063667c5,1,1,
+120,q40,120f44895b66,0,1,unrelated (home repair)
+120,q43,f8e6adc58bb9,0,1,flat yes; reference says it depends on the loan
+120,q46,9ca9f2a17fe5,0,1,"30-45 business days; reference 5 to acknowledge, 30 to respond"
+120,q49,902c601d89b7,0,1,says the dealer must provide a service contract (opposite)
+120,q52,677e99f0c2f0,0,1,"vague, no co-signer release option"
+120,q55,e5155ed4122e,0,0,"says yes, jail is possible (opposite)"
+60,q01,4a091c440d64,1,1,
+60,q04,9c977203cd45,1,1,
+60,q07,0c7748aa384f,0,1,
+60,q10,e0d94edf24f0,1,1,
+60,q13,104a5f2d7470,0,1,
+60,q16,61c6bb17b8ef,0,1,
+60,q19,89bc83ecb21f,0,1,
+60,q22,5e226b727050,1,1,
+60,q25,14dee0c8c135,0,1,
+60,q28,2e87585a202f,0,1,
+60,q31,b2e0d6d60460,1,1,
+60,q34,2563cf952489,1,1,
+60,q37,76ef349d7f6d,1,1,
+60,q40,706ecc9a305d,0,1,
+60,q43,249b01a8df35,1,1,"yes, but the loan terms decide whether a penalty applies: matches"
+60,q46,938c5c3c5944,0,0,
+60,q49,095fb0224801,0,1,
+60,q52,7c65d0de558a,0,1,
+60,q55,ea328c988318,0,0,refused although the document was retrieved at rank 1
+240,q01,50f38bfde5b9,0,1,
+240,q04,80c3835206e6,0,1,
+240,q07,df7c7a4a670f,0,1,
+240,q10,85679abdf4b0,1,1,
+240,q13,049ebf87c755,0,1,
+240,q16,8d09905ad865,0,1,
+240,q19,e4c0334a33c5,1,1,
+240,q22,e5f410375282,0,1,names the big three as the specialty agencies
+240,q25,e8b270b02347,0,0,
+240,q28,feb056776e66,0,0,
+240,q31,2d1af9eb3af3,0,1,
+240,q34,7a1bf78fce47,1,0,
+240,q37,bd6fd96a5999,0,1,free cancellation but no 30-minute limit
+240,q40,5b3edd6268d6,0,1,
+240,q43,b71e8638b7e1,0,1,
+240,q46,ed0eee4d484d,0,1,
+240,q49,9087e21c7f5e,1,1,starts with Yes but states the dealer does not require it: key fact right
+240,q52,2c6c660cb19a,0,1,
+240,q55,4e907c917b90,0,1,

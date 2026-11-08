@@ -153,6 +153,47 @@ The remote address is taken from today's `.dvc/config`, the data hash from the c
 
 MacBook Pro M1 Pro, 16 GB, Docker Desktop 28.3.2 (8 GB for containers). Raw build 1.5 min; one DAG run ≈ 6 s, the 55-month backfill ≈ 7 min; training ≈ 8 min on CPU; `make reproduce` ≈ 9 min (it also builds a fresh environment).
 
+## Lab 3
+
+The LLM component has two jobs ([design 5.1](docs/design.md#51-problem-statement)): an **LLM baseline for the routing task itself** (zero-shot queue prediction, scored with the Lab 2 metric next to the Lab 2 runs) and an **analyst assistant** that answers questions about the rules behind a complaint from the CFPB's own consumer guidance, with citations. Every setting is in [`config/llm.yaml`](config/llm.yaml); every prompt is a file in [`prompts/`](prompts) whose sha256 is logged on every run.
+
+```bash
+make llm-image      # once: build the vLLM 0.30.0 CPU image from source (~1 h on an M1 Pro)
+make llm-up         # vLLM OpenAI-compatible server on localhost:8000, model from config/llm.yaml
+make rag-index      # corpus -> chunks -> embeddings -> pgvector; prints the document count
+make rag-ask Q="Can a debt collector tell my employer about my debt?"
+make llm-baseline   # zero-shot routing on 300 test complaints, logged in experiment complaint-routing
+make rag-eval       # retrieval + answer metrics on 57 questions, experiment complaint-assistant-rag
+make rag-sweep PARAM=retrieval.chunk_size VALUES=60,120,240
+```
+
+| Service | URL (localhost only) | What it holds |
+|---|---|---|
+| vLLM 0.30.0 (CPU, image `vllm-cpu-arm64:0.30.0`) | <http://localhost:8000/v1> | `Qwen/Qwen2.5-0.5B-Instruct`, fp16, OpenAI-compatible API |
+| PostgreSQL 16 + pgvector 0.8.7 (`pgvector/pgvector:0.8.7-pg16-trixie`) | `localhost:5433` | schema `rag` in database `warehouse`: `rag.indexes`, `rag.chunks` |
+
+The PostgreSQL image changed from `postgres:16` to the pgvector build of the same major version and the same Debian release, so the Lab 2 volume is reused as is (82,500 raw rows still there after the switch).
+
+### 1. Corpus
+
+- **Ask CFPB**, the CFPB's consumer Q&A (consumerfinance.gov/ask-cfpb): every English answer page listed in the site's `sitemap.xml`, fetched on 2026-11-07. One page = one document, id `ask-<n>` from the URL. Categories mirror the routing queues (mortgages 192 pages, bank accounts 92, credit cards 56, credit reports 56, auto loans 54, student loans 53, debt collection 47, prepaid cards 33, …).
+- **656 documents, 211,230 words** (median 261 words per page); 17 pages whose answer is shorter than 200 characters are dropped. Public: a US federal government work.
+- The snapshot is committed, [`data/corpus/ask_cfpb.jsonl`](data/corpus/ask_cfpb.jsonl) (1.5 MB), **md5 `f9e1907f4bfe9d6b98e28f0678efe7ad`**; this md5 is the corpus version on every run. `make corpus` re-fetches the live site, which produces a new version ([`corpus.py`](src/complaint_routing/llm/corpus.py)).
+
+### 2. Retrieval pipeline
+
+Diagram: [design 6.1, Retrieval pipeline](docs/design.md#retrieval-pipeline-lab-3). Chunk size, overlap, embedding model and top-k live only in `config/llm.yaml`. The index rows are keyed by an **index version** = hash(corpus md5, chunk size, overlap, embedding model), so the query path refuses to run against an index that does not match the config and the corpus, and sweeps build their own index versions next to the served one.
+
+```text
+$ make rag-index
+corpus data/corpus/ask_cfpb.jsonl (md5 f9e1907f4bfe9d6b98e28f0678efe7ad), chunk_size 120, overlap 20, embedding sentence-transformers/all-MiniLM-L6-v2
+index 6c1f3b1fc70f: 656 documents, 2300 chunks -> rag.chunks
+```
+
+**The index has 656 documents and 2,300 chunks** (57 s on the laptop CPU, embeddings included).
+
+LLM_RESULTS_PLACEHOLDER
+
 ## Maturity scorecard
 
 | Property | Evidence a reviewer checks | Added in |
