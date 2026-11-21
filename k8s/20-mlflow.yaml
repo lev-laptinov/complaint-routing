@@ -1,0 +1,66 @@
+# The tracking server and model registry, inside the cluster, reachable as http://mlflow:5000.
+# It is stateless: the backend store is the `mlflow` database of the PostgreSQL that already holds
+# the registry of Labs 2-3, artifacts are the MinIO bucket `mlflow` (both next to the cluster, as
+# RDS and S3 would be next to EKS). So the registry the cluster serves from is the one `make train`
+# writes to, and complaint-router v1 keeps its lineage tags.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: complaint-routing
+  labels: {app: mlflow}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: mlflow}
+  template:
+    metadata:
+      labels: {app: mlflow}
+    spec:
+      containers:
+        - name: mlflow
+          image: complaint-routing/mlflow:3.16.1   # docker/mlflow/Dockerfile, built in Minikube
+          imagePullPolicy: Never
+          command: ["mlflow", "server"]
+          args:
+            - --host=0.0.0.0
+            - --port=5000
+            - --workers=1                           # the default 4 workers need ~2 GB
+            - --backend-store-uri=$(MLFLOW_BACKEND_URI)
+            - --artifacts-destination=s3://mlflow
+            - --serve-artifacts
+            - --allowed-hosts=mlflow,mlflow:5000,mlflow.complaint-routing,mlflow.complaint-routing:5000,mlflow.complaint-routing.svc.cluster.local:5000,localhost:*,127.0.0.1:*
+          env:
+            - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION   # no job runner + 7 huey workers (~1.3 GB)
+              value: "false"
+            - name: MLFLOW_BACKEND_URI
+              valueFrom: {secretKeyRef: {name: complaint-routing-secrets, key: MLFLOW_BACKEND_URI}}
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: http://__COMPOSE_HOST__:9310
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: {secretKeyRef: {name: complaint-routing-secrets, key: AWS_ACCESS_KEY_ID}}
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: {secretKeyRef: {name: complaint-routing-secrets, key: AWS_SECRET_ACCESS_KEY}}
+          ports:
+            - containerPort: 5000
+          readinessProbe:
+            httpGet: {path: /health, port: 5000}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: 5000}
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 300Mi}
+            limits: {memory: 800Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: complaint-routing
+spec:
+  selector: {app: mlflow}
+  ports:
+    - port: 5000
+      targetPort: 5000

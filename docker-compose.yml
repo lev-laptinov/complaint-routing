@@ -59,6 +59,9 @@ services:
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      # MLflow 3.16 starts a job runner and 7 huey workers by default (~1.3 GB, for GenAI jobs
+      # this project does not use); off, the server holds ~250 MB.
+      MLFLOW_SERVER_ENABLE_JOB_EXECUTION: "false"
     command: >
       mlflow server --host 0.0.0.0 --port 5000 --workers 1
       --backend-store-uri postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/mlflow

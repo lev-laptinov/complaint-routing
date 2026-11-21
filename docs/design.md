@@ -400,39 +400,85 @@ The evaluation loop runs the same query path on the question set, computes hit r
 
 The LLM baseline for routing is a separate, shorter path: test narrative → `prompts/classify_v1.txt` → the same vLLM server → queue name → macro-F1, logged in the Lab 2 experiment `complaint-routing`.
 
-#### Deployment (first draft; Lab 4 replaces it)
+#### Deployment (Lab 4, as built)
 
-Each box names the local component and, in italics, its managed equivalent on AWS / GCP / Azure.
+The real cluster topology. Two services with a Deployment, a Service and both probes each; the tracking server with the registry inside the cluster; monitoring and configuration inside the cluster; the storage layer and the LLM server next to it on the same Docker VM, reached by pods as `host.minikube.internal` (in a cloud this is RDS, S3 and an LLM endpoint next to EKS). Everything is in namespace `complaint-routing` of the Minikube profile `complaint-routing` (Kubernetes 1.30.0, docker driver, 4 GB, 2 CPUs). Images are built inside Minikube and tagged with the git commit; `imagePullPolicy: Never`, so a pod can only run an image built from this repository.
 
 ```mermaid
 flowchart TB
-    CFPB["CFPB archive + API"]
-    subgraph LAPTOP["Laptop / Minikube"]
+    CLIENT["Client: intake service / replay script<br/>(kubectl port-forward 127.0.0.1:8081)"]
+    ANALYST["Analyst<br/>(port-forward 127.0.0.1:8082)"]
+    REGISTRY["Container registry: Minikube's Docker<br/>router:&lt;commit&gt;, assistant:&lt;commit&gt;,<br/>monitor:&lt;commit&gt;, mlflow:3.16.1"]
+    subgraph MK["Minikube cluster, namespace complaint-routing"]
         direction TB
-        subgraph DATA["Storage"]
+        subgraph SVC["Services"]
             direction LR
-            MINIO["MinIO: raw/, clean/, MLflow artifacts<br/><i>S3 / Cloud Storage / Blob Storage</i>"]
-            DVC["DVC remote on MinIO<br/><i>S3 / GCS / Azure Blob remote</i>"]
-            PG["PostgreSQL 16: MLflow backend,<br/>Feast online store, prediction log<br/><i>RDS / Cloud SQL /<br/>Azure DB for PostgreSQL</i>"]
+            R["router (ML service)<br/>Deployment + Service :80<br/>readiness /health/ready, liveness /health/live<br/>POST /predict, /metrics"]
+            A["assistant (LLM service)<br/>Deployment + Service :80<br/>readiness /health/ready, liveness /health/live<br/>POST /ask, /metrics"]
+            M["MLflow 3.16.1 tracking server<br/>Deployment + Service mlflow:5000<br/>registry: complaint-router@champion"]
         end
-        subgraph PIPE["Pipeline and registry"]
+        subgraph MON["Monitoring"]
             direction LR
-            AF["Airflow 3.3.1<br/><i>MWAA / Cloud Composer /<br/>Data Factory</i>"]
-            FEAST["Feast 0.66.0<br/><i>SageMaker / Vertex AI /<br/>Azure ML feature store</i>"]
-            MLF["MLflow 3.16.1<br/><i>SageMaker with MLflow /<br/>Vertex AI Experiments + Registry /<br/>Azure ML with MLflow</i>"]
+            D["CronJob drift-monitor */5<br/>Evidently 0.7.23"]
+            PGW["Pushgateway"]
+            P["Prometheus<br/>scrapes router, assistant, Pushgateway<br/>alert rules"]
+            AM["Alertmanager"]
+            G["Grafana<br/>dashboard Complaint routing"]
+            T["retrain-trigger + CronJob retrain<br/>(suspended template, stretch)"]
         end
-        subgraph SERVE["Serving and monitoring"]
-            direction LR
-            SVC["Routing API: FastAPI + model<br/><i>EKS / GKE / AKS</i>"]
-            REG["Minikube container registry<br/><i>ECR / Artifact Registry / ACR</i>"]
-            MON["Evidently, Prometheus, Grafana<br/><i>Model Monitor + CloudWatch /<br/>Vertex AI Monitoring + Cloud Monitoring /<br/>Azure ML monitoring + Azure Monitor</i>"]
-            VEC["Lab 3: pgvector 0.8.7 + LLM API<br/><i>OpenSearch + Bedrock /<br/>Vector Search + Vertex AI /<br/>AI Search + Azure OpenAI</i>"]
-        end
-        DATA ~~~ PIPE ~~~ SERVE
+        CFG["ConfigMaps routing-config (alias, URLs, window, threshold),<br/>llm-config (= config/llm.yaml), prometheus-config, grafana-*<br/>Secrets complaint-routing-secrets, alertmanager-config (from .env)"]
     end
-    CLIENT["Intake service (client)"]
-    CFPB --> PIPE
-    CLIENT --> SERVE
+    subgraph NEXT["Next to the cluster: docker compose on the same Docker VM"]
+        direction LR
+        PG["PostgreSQL 16 + pgvector<br/>warehouse: features, serving.predictions,<br/>serving.labels, rag.chunks; mlflow: registry"]
+        S3["MinIO: s3://mlflow artifacts, s3://dvc"]
+        LLM["LLM server: vLLM 0.30.0 CPU<br/>Qwen2.5-0.5B-Instruct :8000"]
+    end
+    HUMAN["ML engineer on call<br/>(e-mail)"]
+
+    CLIENT -- "POST /predict" --> R
+    ANALYST -- "POST /ask" --> A
+    REGISTRY -. "pull, tag = commit" .-> SVC
+    R -- "load model by alias" --> M
+    M --> PG
+    M --> S3
+    R -- "point-in-time features,<br/>request log" --> PG
+    A -- "top-k chunks" --> PG
+    A -- "HTTP, OpenAI API" --> LLM
+    D -- "current window" --> PG
+    D -- "reference of the champion" --> M
+    D -- push --> PGW
+    P --> PGW
+    P -- scrape --> R
+    P -- scrape --> A
+    P -- alerts --> AM
+    G --> P
+    AM -- "e-mail" --> HUMAN
+    AM -- "webhook" --> T
+    T -- "Job registers @candidate" --> M
+    CFG -.-> SVC
+    CFG -.-> MON
+```
+
+#### Drift-to-action loop (Lab 4)
+
+```mermaid
+flowchart LR
+    B["Shifted batch<br/>300 held-out complaints (2026-05..07),<br/>30 % of narratives cut to 25 words"]
+    R["router<br/>POST /predict, logs every request:<br/>fields, text descriptors, prediction, version"]
+    CW["Current window<br/>serving.predictions,<br/>last 10 min, <= 300 rows"]
+    RW["Reference window<br/>validation months 2026-03..04 scored by the<br/>champion; artifact in its MLflow run<br/>(data version 835e7d9b…dir)"]
+    D["Drift job<br/>Evidently KS / chi-squared,<br/>CronJob every 5 min"]
+    P["Prometheus<br/>drift_feature_score{narrative_len}<br/>threshold p < 0.001"]
+    AM["Alertmanager<br/>routes by labels"]
+    H["On-call human<br/>e-mail, ML engineer<br/>docs/runbook.md"]
+    T["Retrain (stretch)<br/>Job from CronJob retrain"]
+    REG["Model registry<br/>new version @candidate;<br/>promotion by hand"]
+    B -- replay --> R -- log --> CW --> D
+    RW --> D
+    D -- push --> P --> AM -- notify --> H
+    AM -. "webhook, action=retrain" .-> T -. register .-> REG
+    REG -- "load by alias" --> R
 ```
 
 ### 6.2 Infra

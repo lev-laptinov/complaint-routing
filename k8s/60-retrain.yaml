@@ -1,0 +1,91 @@
+# Stretch goal: the alert starts a retraining run. Alertmanager sends alerts labelled
+# action="retrain" to retrain-trigger, which creates a Job from the suspended CronJob `retrain`
+# below (never scheduled by time). The Job registers a `candidate`; promotion stays manual.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: retrain-trigger, namespace: complaint-routing}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: retrain-trigger, namespace: complaint-routing}
+rules:   # only what the trigger needs: read the template, create and list Jobs
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    resourceNames: [retrain]
+    verbs: [get]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: retrain-trigger, namespace: complaint-routing}
+subjects: [{kind: ServiceAccount, name: retrain-trigger, namespace: complaint-routing}]
+roleRef: {kind: Role, name: retrain-trigger, apiGroup: rbac.authorization.k8s.io}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: retrain-trigger
+  namespace: complaint-routing
+  labels: {app: retrain-trigger}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: retrain-trigger}
+  template:
+    metadata:
+      labels: {app: retrain-trigger}
+    spec:
+      serviceAccountName: retrain-trigger
+      containers:
+        - name: trigger
+          image: complaint-routing/monitor:__IMAGE_TAG__
+          imagePullPolicy: Never
+          args: ["uvicorn", "complaint_routing.monitoring.trigger:app", "--host", "0.0.0.0", "--port", "8080"]
+          ports: [{containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /health, port: 8080}, periodSeconds: 20}
+          resources:
+            requests: {cpu: 20m, memory: 96Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: retrain-trigger, namespace: complaint-routing}
+spec:
+  selector: {app: retrain-trigger}
+  ports: [{port: 8080, targetPort: 8080}]
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: retrain
+  namespace: complaint-routing
+spec:
+  suspend: true                 # a template only: Jobs come from the trigger, not from time
+  schedule: "0 0 1 1 *"
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 1800
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: {app: retrain}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: retrain
+              image: complaint-routing/monitor:__IMAGE_TAG__
+              imagePullPolicy: Never
+              args: ["python", "-m", "complaint_routing.monitoring.retrain"]
+              envFrom:
+                - configMapRef: {name: routing-config}
+              env:
+                - name: WAREHOUSE_DSN
+                  valueFrom: {secretKeyRef: {name: complaint-routing-secrets, key: WAREHOUSE_DSN}}
+                - {name: RETRAIN_MONTHS, value: "12"}
+              resources:
+                requests: {cpu: 500m, memory: 1Gi}
+                limits: {memory: 2500Mi}

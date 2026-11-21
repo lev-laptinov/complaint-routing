@@ -1,0 +1,52 @@
+# The ML service. Loads models:/complaint-router@champion from the registry at start-up (no model
+# in the image); /health/ready is 503 until model, features and prediction log are loaded.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router
+  namespace: complaint-routing
+  labels: {app: router}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: router}
+  template:
+    metadata:
+      labels: {app: router}
+    spec:
+      containers:
+        - name: router
+          image: complaint-routing/router:__IMAGE_TAG__
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef: {name: routing-config}
+          env:
+            - name: WAREHOUSE_DSN
+              valueFrom: {secretKeyRef: {name: complaint-routing-secrets, key: WAREHOUSE_DSN}}
+          ports:
+            - containerPort: 8000
+          readinessProbe:        # no traffic until the model is loaded
+            httpGet: {path: /health/ready, port: 8000}
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:         # restart only a hung process; a missing model is not fixed by a restart
+            httpGet: {path: /health/live, port: 8000}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 200m, memory: 400Mi}
+            limits: {memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router
+  namespace: complaint-routing
+  labels: {app: router}
+spec:
+  selector: {app: router}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

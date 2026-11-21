@@ -1,0 +1,16 @@
+# Build context of docker/service/Dockerfile: code, config, prompts and the corpus only.
+.git
+.venv
+**/__pycache__
+.ruff_cache
+.pytest_cache
+data/raw
+data/source
+data/fixtures
+feature_repo
+mlruns
+docs
+eval
+tests
+*.pdf
+.env

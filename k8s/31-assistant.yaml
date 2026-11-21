@@ -1,0 +1,67 @@
+# The LLM service: a thin container around the Lab 3 query path. The LLM runs outside the cluster
+# (vLLM on the laptop, address in routing-config LLM_SET); config/llm.yaml is the ConfigMap
+# llm-config, created from the same file Lab 3 uses.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: assistant
+  namespace: complaint-routing
+  labels: {app: assistant}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: assistant}
+  template:
+    metadata:
+      labels: {app: assistant}
+      annotations:
+        llm-config-hash: __LLM_CONFIG_HASH__   # a changed llm.yaml rolls the pods
+    spec:
+      containers:
+        - name: assistant
+          image: complaint-routing/assistant:__IMAGE_TAG__
+          imagePullPolicy: Never
+          env:
+            - name: LLM_CONFIG
+              valueFrom: {configMapKeyRef: {name: routing-config, key: LLM_CONFIG}}
+            - name: LLM_SET
+              valueFrom: {configMapKeyRef: {name: routing-config, key: LLM_SET}}
+            - name: RAG_DB_URL
+              valueFrom: {secretKeyRef: {name: complaint-routing-secrets, key: RAG_DB_URL}}
+            - name: LLM_API_KEY
+              valueFrom: {secretKeyRef: {name: complaint-routing-secrets, key: LLM_API_KEY}}
+          volumeMounts:
+            - name: llm-config
+              mountPath: /etc/complaint-routing
+              readOnly: true
+          ports:
+            - containerPort: 8000
+          readinessProbe:        # embedding model + index version + LLM server listing the model
+            httpGet: {path: /health/ready, port: 8000}
+            periodSeconds: 10
+            timeoutSeconds: 8
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /health/live, port: 8000}
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 200m, memory: 600Mi}
+            limits: {memory: 1500Mi}
+      volumes:
+        - name: llm-config
+          configMap: {name: llm-config}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: assistant
+  namespace: complaint-routing
+  labels: {app: assistant}
+spec:
+  selector: {app: assistant}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

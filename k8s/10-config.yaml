@@ -1,0 +1,27 @@
+# Non-secret configuration of the services and jobs. Secrets (database URLs with passwords,
+# MinIO keys, the LLM key, SMTP) are the Secret `complaint-routing-secrets`, created from .env by
+# scripts/k8s-up.sh and never committed. __COMPOSE_HOST__ is how pods reach the storage layer
+# that runs next to the cluster (PostgreSQL, MinIO, vLLM); the script fills it in.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: routing-config
+  namespace: complaint-routing
+data:
+  MODEL_NAME: complaint-router
+  MODEL_ALIAS: champion            # promotion = moving this alias in the registry, not a redeploy
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  MLFLOW_ENABLE_PROXY_MULTIPART_DOWNLOAD: "false"
+  MLFLOW_DISABLE_AGENT_HINT: "1"
+  PUSHGATEWAY_URL: http://pushgateway:9091
+  DRIFT_WINDOW_MINUTES: "10"       # sliding window, evaluated every 5 minutes (CronJob)
+  DRIFT_MIN_ROWS: "100"            # fewer rows: rows are pushed, tests are not run
+  DRIFT_MAX_ROWS: "300"            # larger windows are subsampled: the p-value threshold is per 300 rows
+  DRIFT_ALERT_FEATURE: narrative_len
+  DRIFT_ALERT_PVALUE: "0.001"      # design 6.6: why this value
+  QUALITY_LOOKBACK_HOURS: "24"
+  QUALITY_MIN_LABELS: "50"
+  # The assistant reads config/llm.yaml (ConfigMap llm-config); only the LLM's address differs
+  # inside the cluster. Semicolon-separated KEY=VALUE overrides, hashed into config_hash.
+  LLM_CONFIG: /etc/complaint-routing/llm.yaml
+  LLM_SET: llm.base_url=http://__COMPOSE_HOST__:8000/v1

@@ -39,6 +39,7 @@ from complaint_routing.features import (
     company_queue_mix,
     mix_columns,
 )
+from complaint_routing.monitoring.reference import log_reference
 from complaint_routing.transform import clean
 
 MODEL_NAME = "complaint-router"
@@ -168,6 +169,7 @@ def main() -> None:
             metrics |= scores(part["queue"], model.predict(part), queues, name)
         mlflow.log_metrics(metrics)
         log_report(te["queue"], model.predict(te), queues)
+        log_reference(model, va, queues)  # Lab 4: the drift job's reference for this version
         info = mlflow.sklearn.log_model(
             model, name="model", input_example=te.drop(columns="queue").head(3),
             registered_model_name=None if args.no_register else MODEL_NAME,
@@ -180,6 +182,9 @@ def main() -> None:
         version = info.registered_model_version
         for key in ("data_version", "git_commit", "feature_version", "mapping_version"):
             client.set_model_version_tag(MODEL_NAME, version, key, tags[key])
+        client.set_model_version_tag(
+            MODEL_NAME, version, "reference_window", "..".join(config.VAL_MONTHS)
+        )
         client.set_registered_model_alias(MODEL_NAME, args.alias, version)
         print(f"registered {MODEL_NAME} v{version}, alias '{args.alias}'")
     if args.result_file:

@@ -1,0 +1,72 @@
+# Alert rules (design 6.6). Every drift alert is on the data the job pushed, not on the job status.
+groups:
+  - name: drift
+    rules:
+      - alert: InputDriftNarrativeLength
+        # KS test of narrative length, reference window vs current window (<= 300 rows):
+        # p < 0.001. Why 0.001: design 6.6 (0 of 60 unshifted windows, 60 of 60 shifted ones).
+        expr: drift_feature_score{feature="narrative_len"} < 0.001 and on() drift_window_rows_used >= 100
+        labels: {severity: page, action: retrain}
+        annotations:
+          summary: "Complaint text changed: narrative length drifted (KS p = {{ $value | printf \"%.2g\" }})"
+          description: >-
+            The routing model sees different text than it was validated on (reference window
+            2026-03..04). Open Grafana "Complaint routing" and the MLflow run of this window in
+            experiment complaint-routing-monitoring (Evidently report attached), then follow
+            docs/runbook.md#inputdriftnarrativelength.
+      - alert: DriftMonitorStale
+        # The current window must never be more than 15 minutes old (3 schedules missed).
+        expr: (time() - drift_run_timestamp_seconds > 900) or absent(drift_run_timestamp_seconds)
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "No drift window for {{ $value | humanizeDuration }}: the CronJob is not producing results"
+          description: docs/runbook.md#driftmonitorstale
+      - alert: PredictionsNotLogged
+        # The router served requests but the drift job found none in the log: monitoring is blind.
+        expr: >-
+          (sum(increase(router_requests_total{endpoint="/predict",status="200"}[10m])) > 10)
+          and on() (max(drift_window_rows) < 1)
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "The router serves predictions but the prediction log window is empty"
+          description: docs/runbook.md#predictionsnotlogged
+      - alert: RoutingQualityDrop
+        expr: quality_macro_f1 < 0.70 and on() quality_labelled_rows >= 1000
+        labels: {severity: ticket}
+        annotations:
+          summary: "Macro-F1 on closed complaints is {{ $value | printf \"%.3f\" }} (test 0.776)"
+          description: docs/runbook.md#routingqualitydrop
+  - name: service
+    rules:
+      - alert: RouterNotReady
+        expr: (max(router_ready) < 1) or absent(up{job="router"} == 1)
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "The routing service has no ready pod: intake falls back to general triage"
+          description: docs/runbook.md#routernotready
+      - alert: RouterLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(router_request_latency_seconds_bucket[5m]))) > 0.3
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "Routing p95 latency {{ $value | humanizeDuration }} > 300 ms"
+          description: docs/runbook.md#routerlatencyhigh
+      - alert: RouterErrors
+        expr: >-
+          sum(rate(router_requests_total{status=~"5.."}[5m]))
+          / sum(rate(router_requests_total[5m])) > 0.01
+        for: 10m
+        labels: {severity: page}
+        annotations:
+          summary: "More than 1 % of routing requests fail"
+          description: docs/runbook.md#routererrors
+      - alert: AssistantNotReady
+        expr: (max(assistant_ready) < 1) or absent(up{job="assistant"} == 1)
+        for: 10m
+        labels: {severity: ticket}
+        annotations:
+          summary: "The analyst assistant is not ready (LLM server or retrieval index unavailable)"
+          description: docs/runbook.md#assistantnotready

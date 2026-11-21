@@ -13,6 +13,14 @@ PARAM ?= retrieval.chunk_size
 VALUES ?= 60,120,240
 AIRFLOW = docker compose exec -T airflow airflow
 PSQL = docker compose exec -T postgres psql -U $(POSTGRES_USER)
+# Lab 4: the prediction log and labels live in the warehouse database (schema serving)
+WAREHOUSE_DSN ?= postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:5433/warehouse
+export WAREHOUSE_DSN
+PROFILE ?= complaint-routing
+K = kubectl --context $(PROFILE) -n complaint-routing
+ROWS ?= 300
+SEED ?= 2026
+VERSION ?=
 
 setup:  ## pinned environment, pre-commit hook, local .env
 	[ -f .env ] || cp .env.example .env
@@ -111,5 +119,54 @@ rag-eval:  ## retrieval + answer metrics on eval/rag_questions.jsonl, one MLflow
 rag-sweep:  ## one parameter, several values: make rag-sweep PARAM=retrieval.chunk_size VALUES=60,120,240
 	uv run python -m complaint_routing.llm.evaluate --sweep $(PARAM)=$(VALUES)
 
+## --- Lab 4: serving on Minikube, monitoring and drift ---
+k8s-up:  ## ONE COMMAND: storage, Minikube, images (tag = commit), every workload, smoke request
+	scripts/k8s-up.sh
+
+k8s-forward:  ## 127.0.0.1 access: router 8081, assistant 8082, Grafana 3000, Prometheus 9090, Alertmanager 9093, MLflow (cluster) 5051
+	scripts/k8s-forward.sh
+
+k8s-forward-stop:
+	scripts/k8s-forward.sh stop
+
+k8s-status:
+	$(K) get pods,svc,cronjob,jobs -o wide
+
+k8s-down:  ## delete the cluster (compose storage and the registry stay)
+	minikube delete -p $(PROFILE)
+
+smoke:  ## the smoke request from the host (needs make k8s-forward)
+	uv run python -m complaint_routing.serving.smoke http://localhost:8081
+
+replay:  ## ROWS held-out complaints, unchanged, through POST /predict (needs make k8s-forward)
+	uv run python -m complaint_routing.monitoring.replay --rows $(ROWS) --seed $(SEED) --labels
+
+replay-shift:  ## the documented shift: 30 % of narratives cut to their first 25 words
+	uv run python -m complaint_routing.monitoring.replay --rows $(ROWS) --seed $(SEED) --shift truncate --fraction 0.3 --words 25
+
+drift-now:  ## run the drift CronJob once, now, and print its log
+	$(K) delete job drift-manual --ignore-not-found
+	$(K) create job drift-manual --from=cronjob/drift-monitor
+	$(K) wait --for=condition=complete job/drift-manual --timeout=300s
+	$(K) logs job/drift-manual | grep -v -i warn
+
+psql-window:  ## the newest rows of the prediction log
+	@$(PSQL) -d warehouse -c "select ts, model_version as v, predicted_queue, round(max_proba::numeric, 2) as p, narrative_len, left(narrative, 70) as narrative from serving.predictions order by ts desc limit 20"
+
+registry:  ## versions and aliases of complaint-router
+	uv run python -m complaint_routing.registry show
+
+promote:  ## make promote VERSION=2: move @champion (the old one becomes @previous), then restart the router
+	uv run python -m complaint_routing.registry promote --version $(VERSION)
+	$(K) rollout restart deployment/router
+	$(K) rollout status deployment/router --timeout=300s
+
+reference:  ## backfill the drift reference of the current champion (train.py logs it for new versions)
+	uv run python -m complaint_routing.monitoring.reference --alias champion
+
+dashboard:  ## regenerate k8s/monitoring/dashboard.json
+	uv run python scripts/make_dashboard.py
+
+.PHONY: k8s-up k8s-forward k8s-forward-stop k8s-status k8s-down smoke replay replay-shift drift-now psql-window registry promote reference dashboard
 .PHONY: llm-image llm-up llm-down corpus rag-index rag-ask llm-baseline rag-eval rag-sweep
 .PHONY: setup lint test up down data-pull data-push data-rebuild etl-backfill etl-month etl-wait counts bad-batch feast-apply feast-demo feast-materialize population-mix train reproduce
