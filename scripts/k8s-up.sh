@@ -41,6 +41,7 @@ step "3/8 Minikube ($PROFILE: Kubernetes v1.30.0, docker driver, 4 GB, 2 CPUs)"
 if ! minikube -p "$PROFILE" status >/dev/null 2>&1; then
   minikube start -p "$PROFILE" --driver=docker --memory 4096 --cpus 2 --kubernetes-version=v1.30.0
 fi
+minikube -p "$PROFILE" addons enable metrics-server >/dev/null  # kubectl top: memory and CPU per pod
 # How pods reach the storage that runs next to the cluster (ports published on the host).
 COMPOSE_HOST=${COMPOSE_HOST:-host.minikube.internal}
 

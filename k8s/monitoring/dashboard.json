@@ -27,8 +27,8 @@
   },
   {
    "type": "timeseries",
-   "title": "Narrative length drift: KS p-value (alert below 0.001)",
-   "description": "One point per drift job run (every 5 min, 10-min window, <= 300 rows).",
+   "title": "Narrative length drift: -log10(KS p-value), alert above 3 (p < 0.001)",
+   "description": "One point per drift job run (every 5 min, 10-min window, <= 300 rows). p = 0.1 plots as 1; p = 1e-23 as 23.",
    "datasource": {
     "type": "prometheus",
     "uid": "prometheus"
@@ -47,24 +47,20 @@
       "showPoints": "always",
       "pointSize": 6,
       "spanNulls": false,
-      "scaleDistribution": {
-       "type": "log",
-       "log": 10
-      },
       "thresholdsStyle": {
-       "mode": "line+area"
+       "mode": "dashed"
       }
      },
      "thresholds": {
       "mode": "absolute",
       "steps": [
        {
-        "color": "red",
+        "color": "transparent",
         "value": null
        },
        {
-        "color": "transparent",
-        "value": 0.001
+        "color": "red",
+        "value": 3
        }
       ]
      }
@@ -86,15 +82,15 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "drift_feature_score{feature=\"narrative_len\"}",
-     "legendFormat": "narrative_len p-value",
+     "expr": "-log10(drift_feature_score{feature=\"narrative_len\"})",
+     "legendFormat": "narrative_len",
      "refId": "A"
     }
    ]
   },
   {
    "type": "timeseries",
-   "title": "Drift p-values, text and prediction columns",
+   "title": "Drift, other columns: -log10(p-value)",
    "description": "",
    "datasource": {
     "type": "prometheus",
@@ -113,11 +109,7 @@
       "lineWidth": 2,
       "showPoints": "always",
       "pointSize": 6,
-      "spanNulls": false,
-      "scaleDistribution": {
-       "type": "log",
-       "log": 10
-      }
+      "spanNulls": false
      }
     },
     "overrides": []
@@ -137,7 +129,7 @@
       "type": "prometheus",
       "uid": "prometheus"
      },
-     "expr": "drift_feature_score{feature=~\"n_words|oov_share|mask_share|max_proba|predicted_queue\"}",
+     "expr": "-log10(drift_feature_score{feature=~\"n_words|oov_share|mask_share|max_proba|predicted_queue\"})",
      "legendFormat": "{{feature}}",
      "refId": "A"
     }
@@ -157,7 +149,20 @@
     "y": 1
    },
    "fieldConfig": {
-    "defaults": {},
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
     "overrides": []
    },
    "options": {
@@ -196,7 +201,20 @@
     "y": 1
    },
    "fieldConfig": {
-    "defaults": {},
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
     "overrides": []
    },
    "options": {
@@ -292,7 +310,20 @@
     "y": 5
    },
    "fieldConfig": {
-    "defaults": {},
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
     "overrides": []
    },
    "options": {
@@ -739,7 +770,20 @@
     "y": 34
    },
    "fieldConfig": {
-    "defaults": {},
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
     "overrides": []
    },
    "options": {
@@ -946,7 +990,20 @@
     "y": 34
    },
    "fieldConfig": {
-    "defaults": {},
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     },
+     "color": {
+      "mode": "thresholds"
+     }
+    },
     "overrides": []
    },
    "options": {

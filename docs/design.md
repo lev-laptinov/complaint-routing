@@ -1,6 +1,6 @@
 # Complaint routing — design document
 
-> Status: Lab 3. Sections 5.1, 5.3, 5.4, 6.1, 6.3, 6.7, 7.1 and 7.2 now also describe the LLM component (LLM routing baseline, retrieval assistant) as built and measured; statements still marked **Assumption** are decisions taken without data yet.
+> Status: Lab 4. Sections 5.5, 6.1, 6.2, 6.3, 6.4, 6.6, 6.7, 6.9, 7.3 and 7.4 now describe the deployed system (two services on Minikube, the registry in the cluster, scheduled drift monitoring, alerting to a human, alert-triggered retraining) as built and measured. Lab 3 added the LLM component to 5.1, 5.3, 5.4, 6.1, 6.3, 6.7, 7.1 and 7.2; statements still marked **Assumption** are decisions taken without data yet.
 > Section numbers follow the [ml-design-docs](https://github.com/eugeneyan/ml-design-docs) template and must not change.
 
 ## 1 Overview
@@ -270,12 +270,12 @@ Two features have a serving-time source that differs from the training-time sour
 
 ### 5.5 Human in the loop
 
-- **Drift alert.** The ML engineer on call (the project owner) receives it in Telegram, opens the Evidently report and the Grafana dashboard, and decides: ignore, fix the mapping table, or retrain early.
-- **Model promotion.** The pipeline registers a candidate with its comparison report. The ML engineer moves the `production` alias in MLflow by hand after reading it. **Assumption:** in a real intake team, the queue lead also signs off when a queue is added or removed.
+- **Drift alert (Lab 4, as built).** Prometheus evaluates the rules in `k8s/monitoring/rules.yml`; Alertmanager e-mails the **ML engineer on call (the project owner)**, subject `[complaint-routing] FIRING: <alert> (<severity>)`, with a summary and a link to the runbook section. What to do in the first ten minutes is written in [`docs/runbook.md`](runbook.md): look at the Grafana dashboard "Complaint routing" and the window's Evidently report (MLflow experiment `complaint-routing-monitoring`), read a few rows of the window (`make psql-window`), then decide: upstream change (tell the intake team; retraining does not help), real change in complaints (review the retraining candidate), or replay/test traffic (silence with a reason). `page` alerts: within the hour in working hours; `ticket` alerts: within a working day. The e-mail thread is where the decision is written down.
+- **Model promotion.** Training (by hand with `make train`, or the alert-triggered retraining Job of the stretch goal) registers a new version with the alias `candidate` and a `promotion_gate` tag (validation macro-F1 ≥ the champion's and every queue recall ≥ 0.60). Nothing moves `champion` automatically. The ML engineer reads the comparison and runs `make promote VERSION=<n>`: the alias `champion` moves to `<n>`, the version it replaces gets the alias `previous`, and the router Deployment is restarted; it resolves the alias at start-up, so no image is rebuilt (README, Lab 4, 3). **Assumption:** in a real intake team, the queue lead also signs off when a queue is added or removed.
 - **Override.**
-  - Analysts re-route any complaint by hand; every re-route is logged and becomes a label.
-  - The ML engineer can roll back the alias to the previous version or switch the service to the fallback (general triage) with a config flag.
-- **Taxonomy change.** A new product name fails the quality gate as "unknown product". A human adds it to the mapping table; that is a versioned change reviewed in a pull request.
+  - Analysts re-route any complaint by hand; every re-route is logged and becomes a label (`serving.labels`).
+  - Rollback is the same command with the `previous` version: `make promote VERSION=<previous>`. The intake falls back to the general triage queue on any 5xx or timeout (6.8), which is also what happens while no router pod is ready.
+- **Taxonomy change.** A new product name fails the quality gate as "unknown product". A human adds it to the mapping table; that is a versioned change reviewed in a pull request. The router refuses to load a model whose `mapping_version` tag differs from the mapping in its image (it stays not ready), so a model and an image with different queue lists never serve together.
 
 ## 6 Implementation
 
@@ -303,7 +303,7 @@ flowchart LR
 
 #### Data flow (seven layers)
 
-Real component names as of Lab 2; layers 6–7 are still the plan for Lab 4. The three marks are drawn as circles:
+Real component names as of Lab 2; layers 6–7 as first planned (built in Lab 4 as drawn in *Deployment* below: the routing API reads features point-in-time from the feature table and the prediction log replaces the nightly re-score as the monitoring input). The three marks are drawn as circles:
 - **V**, the version point: DVC md5 of `data/raw`, stamped on every row as `data_version`;
 - **Q**, the quality gate: Airflow tasks `validate` (raw contract) and `quality_check` (loaded data);
 - **the split** between the offline side (training) and the online side (serving), inside layer 3.
@@ -491,13 +491,15 @@ flowchart LR
 | Orchestrator | Apache Airflow 3.3.1 (`apache/airflow:3.3.1-python3.12`, `airflow standalone`), LocalExecutor, DAG `complaints_etl` | Amazon MWAA | Cloud Composer | Azure Data Factory |
 | Experiment tracking, registry | MLflow 3.16.1 (image built from `python:3.12-slim`, no official 3.16.1 image), PostgreSQL backend, MinIO artifacts proxied by the server | SageMaker with MLflow | Vertex AI Experiments + Model Registry | Azure ML with MLflow |
 | Feature store | Feast 0.66.0, separate environment in `feature_repo/` (it needs pandas < 3); offline and online store: PostgreSQL | SageMaker Feature Store | Vertex AI Feature Store | Azure ML managed feature store |
-| Container registry | Minikube built-in registry | Amazon ECR | Artifact Registry | Azure Container Registry |
-| Kubernetes cluster | Minikube 1.33.1 (K8s 1.30.0, docker driver, 4 GB) | Amazon EKS | GKE | AKS |
-| Model and data monitoring | Evidently | SageMaker Model Monitor | Vertex AI Model Monitoring | Azure ML model monitoring |
-| Metrics and dashboards | Prometheus, Grafana | Amazon CloudWatch | Cloud Monitoring | Azure Monitor |
+| Container registry | Minikube's own Docker image store (`minikube image build`, `imagePullPolicy: Never`); images `complaint-routing/{router,assistant,monitor}:<commit>` | Amazon ECR | Artifact Registry | Azure Container Registry |
+| Kubernetes cluster | Minikube 1.34.0 (the installed release; the course pins 1.33.1) running Kubernetes 1.30.0 as pinned, profile `complaint-routing`, docker driver, 4 GB, 2 CPUs; namespace `complaint-routing` | Amazon EKS | GKE | AKS |
+| Model and data monitoring | Evidently 0.7.23 in the CronJob `drift-monitor` (image `monitor:<commit>`) | SageMaker Model Monitor | Vertex AI Model Monitoring | Azure ML model monitoring |
+| Metrics and dashboards | Prometheus 3.5.0, Pushgateway 1.11.1, Alertmanager 0.28.1 (e-mail), Grafana 12.1.0, plain manifests (no operator: it does not fit in 4 GB with the rest) | Amazon CloudWatch | Cloud Monitoring | Azure Monitor |
 | Vector store (Lab 3) | pgvector 0.8.7 in the same PostgreSQL 16 (`pgvector/pgvector:0.8.7-pg16-trixie`, schema `rag`) | OpenSearch Serverless vector search | Vertex AI Vector Search | Azure AI Search |
 | LLM inference (Lab 3) | vLLM 0.30.0, OpenAI-compatible server, CPU image built from source (`vllm-cpu-arm64:0.30.0`), `Qwen/Qwen2.5-0.5B-Instruct` fp16; compose profile `llm`, `127.0.0.1:8000` | Amazon Bedrock | Vertex AI generative AI | Azure OpenAI |
 | Embedding model (Lab 3) | sentence-transformers `all-MiniLM-L6-v2`, CPU, in the client process | Bedrock embeddings | Vertex AI embeddings | Azure OpenAI embeddings |
+
+Lab 4 runs the serving and monitoring layers in Minikube and keeps the storage layer (PostgreSQL, MinIO) and the LLM server in docker compose next to it, on the same Docker VM, raised from 8 to 12 GB for this lab (6.7); pods reach them as `host.minikube.internal`. The tracking server runs in both places over the same backend and artifact store: in the cluster for the cluster (`http://mlflow:5000`), in compose for the laptop (training, UI on `localhost:5050`). Airflow is not needed while the cluster runs and stays stopped.
 
 Lab 2 runs layers 1–5 with `docker compose` (`make up`): PostgreSQL, MinIO (+ a one-shot bucket-creating `amazon/aws-cli` container), MLflow and Airflow. The pipeline, training and Feast share one pandas version (3.0.5, the one in the Airflow image) except Feast, which runs in its own environment.
 
@@ -509,6 +511,8 @@ Lab 2 runs layers 1–5 with `docker compose` (`make up`): PostgreSQL, MinIO (+ 
 - **Budgets.**
   - Throughput: ≈ 1,000 complaints/day (**Assumption**), about 0.01 req/s on average and ~0.1 req/s at peak. We design for ≥ 5 req/s on one CPU pod.
   - p95 ≤ 300 ms end to end, of which ≤ 50 ms is the Feast online lookup (**Assumption**, measured in Lab 4).
+- **Routing service as deployed (Lab 4, measured, 7.3).** One pod (1 uvicorn process, 2 CPUs shared by the whole Minikube node): p50 18 ms / p95 25 ms one request at a time, p95 110 ms at concurrency 8, saturating at ≈ 94 req/s, so the 300 ms and 5 req/s budgets hold with a wide margin and one replica suffices. The company-mix lookup is in memory (all 71,419 point-in-time rows of the feature view, loaded at start-up in 0.66 s) and costs ~5 µs instead of the 50 ms budgeted for an online-store round trip. Every request also writes one row to the prediction log (PostgreSQL), which is most of the gap between the in-process p50 (9 ms) and the client's.
+- **Online serving is what we built.** The intake needs a queue at submission; the monitoring reads the online prediction log instead of a nightly batch re-score. If routing were switched to batch, the current window would be the batch output, drift could be computed per batch instead of per time window, and latency alerts would become batch-duration and freshness alerts.
 - **Training.** Batch, monthly, ≤ 30 min on a laptop CPU.
 - **LLM component (Lab 3, measured).** Local inference on CPU: vLLM 0.30.0 in Docker on a MacBook Pro M1 Pro (8 cores, 16 GB; Docker VM 8 CPUs / 8 GB), `Qwen2.5-0.5B-Instruct`, 0.5 B parameters, fp16 (no quantization), no GPU; the server holds 4.9 GB.
   - Assistant answer (854 tokens in, 85 out): **p50 5.1 s, p95 13.5 s** over 57 calls, cold first call 2.8 s. Routing baseline (418 in, 3 out): p50 1.0 s, p95 1.5 s over 300 calls.
@@ -528,7 +532,13 @@ Lab 2 runs layers 1–5 with `docker compose` (`make up`): PostgreSQL, MinIO (+ 
   - Airflow runs with the simple auth manager in all-admins mode (no login) — acceptable only because it is bound to localhost; a shared deployment needs real users.
   - MLflow restricts the `Host` header (`--allowed-hosts`), which blocks DNS-rebinding requests from a browser.
 - **As built in Lab 3.** The vLLM server is published on `127.0.0.1:8000` only and has no key (any key is accepted), which is acceptable only on localhost. `LLM_API_KEY` exists in `.env` so an API provider can be configured without code changes; a key ever committed would be revoked, not deleted from history.
-- **Who may call.** Only the intake service may call the routing API, with a service token; the API is not exposed outside the cluster. MLflow, Airflow and Grafana are available on localhost only.
+- **As built in Lab 4.**
+  - Secrets: one Secret `complaint-routing-secrets` (database URLs with the password, MinIO keys, LLM key) and one `alertmanager-config` (it contains the SMTP password), both created by `scripts/k8s-up.sh` from `.env` with `kubectl create --dry-run | apply`; neither exists as a file in the repository. Non-secret settings are ConfigMaps.
+  - Every Service is `ClusterIP`: nothing is exposed outside the cluster. The laptop reaches them through `kubectl port-forward` bound to `127.0.0.1` (`make k8s-forward`). Grafana has anonymous admin access, acceptable only behind that localhost forward.
+  - Containers of our images run as user 65534 (not root); images run only if built locally (`imagePullPolicy: Never`).
+  - The retraining trigger has its own ServiceAccount whose Role may only read the CronJob `retrain` and create/list Jobs in the namespace.
+  - Not done (would be for a shared cluster): a service token between the intake service and the router, NetworkPolicies, TLS inside the cluster.
+- **Who may call.** Only the intake service may call the routing API, with a service token (**Assumption**, not built: see above); the API is not exposed outside the cluster. MLflow, Airflow and Grafana are available on localhost only.
 
 ### 6.5 Data privacy
 
@@ -536,24 +546,41 @@ Lab 2 runs layers 1–5 with `docker compose` (`make up`): PostgreSQL, MinIO (+ 
 - **Serving data.** Serving requests in the intake scenario contain raw PII (names, account numbers). `scrub_pii()` runs before anything is logged; the prediction log stores only scrubbed text.
 - **`scrub_pii()` as built** (`src/complaint_routing/transform.py`): masks e-mail addresses, phone numbers and any run of ≥ 6 digits (account, card and SSN-like numbers) with `XXXX`, the CFPB's own mask. It runs in `transform`, so `dwh.complaints`, the features and the model all see scrubbed text; `raw.complaints` keeps the archive text as published (already scrubbed by the CFPB, CC0).
 - **What is stored where in Lab 2.** Public CFPB text only: the DVC remote and `raw`/`dwh` schemas hold the 82,500-row sample, MLflow stores three example rows as the model's input example. No request data exists yet.
+- **Lab 4: the prediction log.** `serving.predictions` stores the narrative after `scrub_pii()` (the router scrubs before predicting and logging; a test checks that a phone number does not reach the log), never the raw request body. The reference window in each model's MLflow run holds no text, only the descriptors (length, word count, mask share, out-of-vocabulary share), form fields and predictions.
 - **Retention.**
   - Raw batches: as long as a registered model depends on them (lineage).
   - Prediction logs: 90 days.
   - Raw request bodies are never stored.
 - **Sensitive attributes.** Tags are used as features. **Assumption:** this is acceptable for routing, but recall per tag group is reported, so the model does not route vulnerable groups worse.
 
-### 6.6 Monitoring and alarms (first draft; Lab 4 makes it real)
+### 6.6 Monitoring and alarms
 
-| Metric | Where computed | Threshold (**Assumption**) | Who is alerted |
+**Windows.**
+- **Reference window:** the validation months 2026-03 → 04 (2,856 complaints) scored by the champion itself, stored as `monitoring/reference.parquet` in the champion's MLflow run (data version `835e7d9b…dir`; `train.py` logs it for every new version, `make reference` backfilled v1). Not the training set: it spans 2022–2026 and two taxonomy changes, so every recent window would "drift" from it; the validation window is the last labelled data before deployment and carries the model's own predictions, which prediction drift needs. It covers 8 full weeks, so a weekday pattern is inside the reference, not a source of alarms.
+- **Current window:** the prediction log `serving.predictions` (one row per request: scrubbed narrative, form fields, the company-mix features used, text descriptors, predicted queue, top probability, model version, image commit), the champion's rows of the last 10 minutes. Windows with more than 300 rows are subsampled (seeded) to 300, so the p-value threshold means the same at any traffic; with fewer than 100 rows the job pushes the row count and runs no test.
+- **Schedule:** Kubernetes CronJob `drift-monitor`, every 5 minutes (a sliding 10-minute window). This compresses time for the lab; in production the window would be a day and the schedule hourly, with the same code (`DRIFT_WINDOW_MINUTES`).
+
+**What is computed and where it goes.** The drift job runs Evidently 0.7.23 `DataDriftPreset` on 20 columns with explicit tests (Kolmogorov–Smirnov for the 16 numeric columns, chi-squared for the 4 categorical ones, as Evidently does for small samples), the Jensen–Shannon distance of the predicted queue mix, and macro-F1/accuracy on predictions whose labels have arrived (`serving.labels`, last 24 h); it pushes them to the Prometheus Pushgateway and logs one MLflow run per window (experiment `complaint-routing-monitoring`, Evidently HTML report attached when the alert condition holds). The services expose `/metrics` (request counts by status, latency histograms, predictions by queue, top-probability histogram, prediction-log errors, readiness, loaded model version and image commit), scraped by Prometheus every 15 s. Grafana's dashboard "Complaint routing" shows both.
+
+| Alert (`k8s/monitoring/rules.yml`) | Metric | Threshold | Severity → who |
 |---|---|---|---|
-| Latency p95, error rate, fallback rate | Prometheus, from the API | p95 > 300 ms or errors > 1 % or fallback > 2 % for 10 min | ML engineer (Telegram) |
-| Predicted queue mix vs the training reference | Evidently, daily | Jensen–Shannon distance > 0.1 | ML engineer |
-| Text drift: narrative length, vocabulary (share of out-of-vocabulary tokens) | Evidently, daily | OOV share > 1.5 × reference, or a length-distribution drift test fails | ML engineer |
-| Confidence: share of predictions with max probability < 0.5 | Evidently, daily | > 2 × reference | ML engineer |
-| Macro-F1 and per-queue recall on labelled complaints | Airflow eval task, weekly, on complaints closed in the past week (received 15–60 days earlier) | macro-F1 drops > 0.05 vs test, or any queue recall < 0.60 | ML engineer → retraining decision |
-| Upstream schema and freshness: null-narrative share, unknown products, rows per batch | Quality gate: task `validate` of `complaints_etl` (built in Lab 2) | null narratives > 5 %, any unknown product, a date outside the batch month, < 500 rows, or a file identical to the previous month's (stale partition). The sample has a fixed 1,500 rows per month, so an equal row count would not mean stale | ML engineer; the DAG fails |
+| `InputDriftNarrativeLength` | `drift_feature_score{feature="narrative_len"}`: KS p-value, reference vs current window (≤ 300 rows) | **p < 0.001** with ≥ 100 rows; fires on the first such window | page → ML engineer (e-mail); also starts retraining (stretch) |
+| `DriftMonitorStale` | `time() - drift_run_timestamp_seconds` | > 15 min (3 schedules missed), or the metric absent, for 5 min | page → ML engineer |
+| `PredictionsNotLogged` | router `/predict` 200s in 10 min vs `drift_window_rows` | > 10 served and 0 in the window, for 5 min | page → ML engineer |
+| `RoutingQualityDrop` | `quality_macro_f1` on labelled predictions | < 0.70 with ≥ 1,000 labels (test macro-F1 0.776; 300 labels have a standard deviation of ~0.04, too noisy for a tighter bound) | ticket → ML engineer |
+| `RouterNotReady` | `router_ready`, `up{job="router"}` | no ready pod for 5 min | page → ML engineer |
+| `RouterLatencyHigh` | p95 of `router_request_latency_seconds` | > 300 ms for 10 min (budget 6.3) | page → ML engineer |
+| `RouterErrors` | 5xx share of router requests | > 1 % for 10 min | page → ML engineer |
+| `AssistantNotReady` | `assistant_ready`, `up{job="assistant"}` | not ready for 10 min | ticket → ML engineer |
+| Quality gate (Lab 2) | null-narrative share, unknown products, dates, rows, stale file | as before: fails the `validate` task of `complaints_etl` | ML engineer; the DAG fails |
 
-The 2026-08-14 narrative cutoff is exactly the event the last row exists for: the null-narrative share of the live API batch jumps to 100 %. The gate stops the batch from reaching training, and the monitoring falls back to queue-mix tracking on structured data.
+Shown on the dashboard but not alerted on: Evidently's share of drifted columns, the p-values of the other columns, the Jensen–Shannon distance of the predicted queue mix (the first draft's alert, JS > 0.1), and quality while there are fewer than 1,000 labels.
+
+**Why this metric and p < 0.001.** The consumer of the alert is the ML engineer who keeps the router's queue assignments trustworthy for the intake analysts; the question the alert answers is "is the model reading text unlike the text it was validated on?", before labels can say anything (15–60 days). Narrative length is the column that moves when the text changes in the ways that matter here (a form that truncates, a scrubber that removes more, the 2026-08 narrative cutoff in its milder forms), and it was measured, not chosen by default. On 60 windows of 300 unshifted held-out complaints (test months 2026-05 → 07) against the reference, the KS p-value of narrative length was below 0.05 in 7 windows (12 %), below 0.01 in 1, and below 0.001 in **none** (minimum 0.0033). With the documented shift (30 % of narratives cut to 25 words) it was below 0.001 in **60 of 60** windows (all below 10⁻⁵), with 20 % of rows cut in 59 of 60, with 10 % in 21 of 60. So at 0.001 the measured false-alarm rate is 0 of 60 (95 % upper bound 5 % by the rule of three), and the shift we care about is never missed; at 0.05 the 5-minute schedule would e-mail several times a day for nothing. What each error costs: a false alarm costs about ten minutes of the engineer's time (and, with the stretch goal, a retraining run that only registers a candidate); a missed drift costs routing quality the labels will reveal weeks later — for this shift little (accuracy 83.2 % → 82.1 %, macro-F1 0.766 → 0.759, means over the 60 windows), but a shrinking narrative is the early form of the change that removes the text entirely. We accept missing shifts that touch ≤ 10 % of rows. The defaults are worse for this consumer: Evidently's dataset rule (share of drifted columns ≥ 0.5) fired on 3 of 12 unshifted windows, because the company-mix features drift between any two quarters (the credit-reporting share in the mix fell from 0.13 in 2026-03 to 0.04 in 2026-07) — a real but expected change, which is why the alert is on one feature and not the share. Prediction drift (chi-squared on the predicted queue) does not see this shift at all: p < 0.05 in 4 of 12 unshifted and 3 of 12 shifted windows.
+
+**A green job is not a fresh table.** `DriftMonitorStale` watches the timestamp the job pushes, and `PredictionsNotLogged` compares what the router served with what the job found in the log; together they catch a CronJob that stopped and a job that succeeds on an empty window because the services write nowhere.
+
+The 2026-08-14 narrative cutoff is exactly the event the quality gate's null-narrative row exists for: the null-narrative share of the live API batch jumps to 100 %. The gate stops the batch from reaching training, and the monitoring falls back to queue-mix tracking on structured data.
 
 ### 6.7 Cost
 
@@ -598,6 +625,12 @@ Two columns:
 - The model itself costs cents: training is $0.07 per month, and serving fits on the shared node.
 - The decision is therefore the lean column: the same components, self-hosted on the cluster we already pay for. The managed versions are worth it only when the team, not the workload, grows (more users, SLAs on the tracking server).
 
+**Serving cost, Lab 4 (measured on the laptop).** Money: none. Resources, measured with `kubectl top` and `docker stats` with everything running (README, Lab 4, 8):
+- the Minikube node holds 3.4 GB of its 4 GB: router 376 MiB, assistant 711 MiB (the embedding model), MLflow 426 MiB, Grafana 186 MiB, Prometheus 63 MiB, Alertmanager, Pushgateway and the trigger under 50 MiB each; a drift run adds ~0.4 GB for a few seconds, a retraining run 0.7 GB and 1.8 CPUs for 7.5 minutes;
+- next to it: vLLM 4.8 GB, the compose MLflow 0.4 GB, PostgreSQL 0.13 GB, MinIO 0.19 GB. In total ≈ 8.9 GB, which does not fit the 8 GB Docker VM of Labs 2–3. **Decision:** the Docker VM was raised to 12 GB (of the laptop's 16 GB) and the LLM stays local; MLflow's job runner and its 7 worker processes (1.3 GB per server, unused here) were switched off.
+- **The LLM service in Lab 4 calls the local vLLM server** (Lab 3, `Qwen2.5-0.5B-Instruct` on CPU, outside the cluster), not an API. Its price is compute, not money: about 7 s of the shared 8-CPU VM per answer (p50 7.1 s, 810 input + 99 output tokens) and 4.8 GB of memory while it runs; with the cluster competing for the same CPUs, p95 rose from 13.5 s (Lab 3) to 21 s. On the lean EKS column this means a separate node (≈ $0.10/h for a t3.large, ~$72/month always on) or an API.
+- The routing model's serving cost is negligible: ~4 ms of CPU and 376 MiB per pod; one pod serves ≈ 90 requests/s (7.3), ~1,000× the expected traffic.
+
 ### 6.8 Integration points
 
 - **Upstream: CFPB (archive and API).**
@@ -629,6 +662,12 @@ Two columns:
 | Training–serving skew in PII scrubbing (CFPB's scrubber vs our `scrub_pii()`) | Run `scrub_pii()` on archive text as well, so both paths see the same masks; a test compares the `XXXX` share across paths |
 | Leakage through issue or sub-product fields, or through future company stats | Fields are whitelisted per the table in 5.2; Feast point-in-time joins |
 | Archive schema differs from the assumption | Checked in Lab 2: all 18 files used have the 16-column schema; `validate` fails any batch with a missing column before it is loaded |
+| **Lab 4:** the cluster depends on storage outside it (PostgreSQL, MinIO, vLLM in docker compose, reached as `host.minikube.internal`) | If PostgreSQL is down the router stays not ready at start-up and keeps serving (without logging) once loaded; `RouterNotReady`, `PredictionsNotLogged` and `DriftMonitorStale` fire. In a cloud these are managed services (RDS, S3) with their own availability; locally, `make k8s-up` starts them first |
+| **Lab 4:** a promotion points the alias at a version that cannot serve (missing artifacts, other queue list) | The new pod never becomes ready (readiness waits for the model; a `mapping_version` mismatch is refused), the rolling update keeps the old pod serving, and `make promote VERSION=<previous>` rolls back. Tested with an alias that does not exist (README, Lab 4, 3) |
+| **Lab 4:** drift alerts on expected change (company mix moves every quarter) or on traffic volume | The alert is on one measured feature with a measured threshold (6.6), windows are subsampled to 300 rows so the p-value does not shrink with traffic, and the reference is re-logged with every model version |
+| **Lab 4:** monitoring blind spots: concept drift (the same text now belongs to another queue) is invisible to input and prediction drift | Only labels show it: `RoutingQualityDrop` on closed complaints, 15–60 days late. Taxonomy changes are caught earlier by the quality gate's "unknown product" rule |
+| **Lab 4:** memory: Minikube (4 GB), vLLM (4.7–6 GB) and the compose services share one Docker VM | Docker VM raised from 8 to 12 GB for Lab 4; MLflow's job runner and 7 workers (1.3 GB per server) switched off; Airflow is not needed while the cluster runs and stays stopped. Measured use in 6.7 |
+| **Lab 4:** port-forwards from the laptop hang when a pod is replaced | `make k8s-forward` restarts each forward when its HTTP check fails; inside the cluster, clients use the Services and are not affected |
 
 ## 7 Appendix
 
@@ -698,11 +737,29 @@ What this says:
 
 ### 7.3 Performance benchmarks
 
-Placeholder: filled in Lab 4 (routing API p50/p95 under load, Feast lookup latency).
+Measured on the deployed services (MacBook Pro M1 Pro; Docker VM 8 CPUs / 12 GB; Minikube 2 CPUs / 4 GB; one replica each), commit `ce2bf91`, champion v1. Client-side numbers include `kubectl port-forward` from the laptop; commands and raw output in the README (Lab 4, 8).
+
+| What | Load | p50 | p95 | Throughput |
+|---|---|---|---|---|
+| Router `POST /predict`, client side | 1,000 held-out complaints, 1 at a time | 18 ms | 25 ms | 51 req/s |
+| Router `POST /predict`, client side | 1,000, concurrency 4 | 43 ms | 57 ms | 91 req/s |
+| Router `POST /predict`, client side | 1,000, concurrency 8 | 83 ms | 110 ms | 94 req/s (saturated: one process) |
+| Router, in-process (features + model, logged `latency_ms`) | the 3,000 above | 9.4 ms | 28.9 ms | — |
+| Router, server-side histogram (Prometheus, incl. prediction-log insert) | same | — | 84 ms | — |
+| Point-in-time feature lookup (`company_queue_mix`, in memory) | 10,000 lookups | 4.4 µs | 7.8 µs | — |
+| Feature table load at start-up | 71,419 rows, 1,732 companies | 0.66 s | — | — |
+| Router start-up to ready (model from the registry + features) | one pod | ~10 s | — | — |
+| Assistant `POST /ask` (retrieval + vLLM on CPU) | 20 evaluation questions, sequential | 7.1 s | 21.0 s | — |
+| Drift job (Evidently, 20 columns, 300 rows) | one window | < 1 s compute; ~15 s pod start | — | — |
+| Retraining Job (12 months + labelled serving rows, 14,824 rows) | one run | 7 min 26 s | — | — |
+| `make k8s-up`, images already built | everything up + smoke | BRINGUP_WARM | — | — |
+| `make k8s-up` on a clean clone (cluster deleted, images built) | everything | BRINGUP_COLD | — | — |
+
+Against the budgets of 6.3: routing p95 25–110 ms vs 300 ms, throughput ≈ 90 req/s vs 5 req/s; the feature lookup (budget 50 ms) costs microseconds, because the table of one feature view fits in memory. The assistant (budget 15 s p95) misses it in the cluster: the 0.5 B model on CPU competes with Minikube for the same 8 cores.
 
 ### 7.4 Milestones
 
 - **Lab 2 (done).** A DVC-versioned monthly sample of the archive (remote on MinIO); Airflow DAG `complaints_etl` loads it month by month into PostgreSQL with a quality gate and builds the feature table (Feast on top). The time split, two rule baselines and the candidate are tracked in MLflow with data version and commit; v1 is registered as `champion` and reproduced with one command.
 - **Lab 3 (done).** A zero-shot LLM routing baseline is logged next to the Lab 2 runs (macro-F1 0.34 vs the champion's 0.83 on the same 300 test complaints). An analyst assistant answers questions from the Ask CFPB corpus (656 pages, pgvector index, vLLM on CPU), evaluated on 57 questions for hit rate, MRR and a hand-rubric answer metric; one parameter at a time (chunk size, embedding model), every run tracked with config, prompt and index hashes.
-- **Lab 4.** The routing API and monitoring run on Minikube. Replaying 2026-08, or an injected shift in queue mix and vocabulary, crosses a drift threshold, and the alert reaches the ML engineer.
+- **Lab 4 (done).** Both services (router, assistant) run on Minikube with probes, images tagged with the commit, configuration in ConfigMaps and secrets in Secrets; the router loads `complaint-router@champion` from the tracking server in the cluster, and promotion/rollback is an alias move plus a restart (v1 → v2 → v1, same image). A CronJob compares the prediction log with the champion's reference window every 5 minutes; a documented shift (30 % of narratives cut to 25 words) drives the narrative-length p-value from 0.11 to 1.7·10⁻²³, the alert goes to the ML engineer by e-mail and starts a retraining Job that registers a candidate (gate failed, nothing promoted). `make k8s-up` brings it all up from a clean clone.
 - **Lab 5.** An agent uses the system's tools (routing API, monitoring metrics, MLflow, the assistant) to triage a batch of complaints and explain a drift alert.

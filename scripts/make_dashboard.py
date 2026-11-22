@@ -21,13 +21,15 @@ def row(title: str) -> None:
 def ts(title, targets, x, w=8, h=8, unit=None, log=False, thresholds=None, desc="", points=True):
     custom = {"drawStyle": "line", "lineWidth": 2, "showPoints": "always" if points else "never",
               "pointSize": 6, "spanNulls": False}  # fmt: skip
+    defaults = {"custom": custom}
     if log:
         custom["scaleDistribution"] = {"type": "log", "log": 10}
-    defaults = {"custom": custom}
+        defaults["unit"] = "sci"
+        defaults["decimals"] = 0
     if unit:
         defaults["unit"] = unit
     if thresholds:
-        custom["thresholdsStyle"] = {"mode": "line+area"}
+        custom["thresholdsStyle"] = {"mode": "dashed"}
         defaults["thresholds"] = {"mode": "absolute", "steps": thresholds}
     panels.append({
         "type": "timeseries", "title": title, "description": desc, "datasource": DS,
@@ -42,6 +44,7 @@ def ts(title, targets, x, w=8, h=8, unit=None, log=False, thresholds=None, desc=
 
 def stat(title, expr, x, w=4, h=4, unit=None, legend="", thresholds=None, text=False):
     defaults = {"unit": unit} if unit else {}
+    thresholds = thresholds or [{"color": "blue", "value": None}]
     if thresholds:
         defaults["thresholds"] = {"mode": "absolute", "steps": thresholds}
         defaults["color"] = {"mode": "thresholds"}
@@ -59,13 +62,14 @@ def stat(title, expr, x, w=4, h=4, unit=None, legend="", thresholds=None, text=F
 GREEN, RED, AMBER = "green", "red", "orange"
 
 row("Drift: reference window (validation months, champion) vs current window (prediction log)")
-ts("Narrative length drift: KS p-value (alert below 0.001)",
-   [('drift_feature_score{feature="narrative_len"}', "narrative_len p-value")], 0, w=10,
-   log=True, thresholds=[{"color": RED, "value": None}, {"color": "transparent", "value": 0.001}],
-   desc="One point per drift job run (every 5 min, 10-min window, <= 300 rows).")  # fmt: skip
-ts("Drift p-values, text and prediction columns",
-   [('drift_feature_score{feature=~"n_words|oov_share|mask_share|max_proba|predicted_queue"}',
-     "{{feature}}")], 10, w=8, log=True)  # fmt: skip
+ts("Narrative length drift: -log10(KS p-value), alert above 3 (p < 0.001)",
+   [('-log10(drift_feature_score{feature="narrative_len"})', "narrative_len")], 0, w=10,
+   thresholds=[{"color": "transparent", "value": None}, {"color": RED, "value": 3}],
+   desc="One point per drift job run (every 5 min, 10-min window, <= 300 rows). "
+        "p = 0.1 plots as 1; p = 1e-23 as 23.")  # fmt: skip
+ts("Drift, other columns: -log10(p-value)",
+   [('-log10(drift_feature_score{feature=~"n_words|oov_share|mask_share|max_proba|predicted_queue"})',
+     "{{feature}}")], 10, w=8)  # fmt: skip
 stat("Alert threshold (p)", "vector(0.001)", 18, w=3, h=4)
 stat("Window rows", "max(drift_window_rows)", 21, w=3, h=4)
 y += 4
