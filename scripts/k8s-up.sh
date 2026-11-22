@@ -15,7 +15,9 @@ step() { printf '\n[%4ss] == %s\n' "$(($(date +%s) - START))" "$*"; }
 step "0/8 local environment (.env, uv)"
 [ -f .env ] || cp .env.example .env
 set -a; . ./.env; set +a
-export WAREHOUSE_DSN=${WAREHOUSE_DSN:-postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5433/warehouse}
+# Built here, after .env exists: on a clean clone the Makefile ran before .env was created,
+# so anything it derived from .env (WAREHOUSE_DSN with an empty user and password) is wrong.
+export WAREHOUSE_DSN="postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5433/warehouse"
 uv sync --frozen -q
 COMMIT=$(git rev-parse HEAD)
 TAG=$(git rev-parse --short=12 HEAD)
