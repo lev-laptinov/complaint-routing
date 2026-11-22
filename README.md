@@ -548,6 +548,10 @@ NAME                 STATUS    COMPLETIONS   DURATION   AGE
 retrain-1795354568   Running   0/1           9s         9s
 ```
 
+The e-mail as received (Mail on the laptop, 15:36 local time = 13:36 UTC; the recipient address is blanked out). The `RESOLVED` message for the same alert followed ten minutes later, once the next unshifted window pushed p back above the threshold:
+
+![Alert e-mail received: InputDriftNarrativeLength, KS p = 2.7e-28](docs/screenshots/alert_email.png)
+
 What the on-call engineer does next is in [`docs/runbook.md`](docs/runbook.md).
 
 ### 6. Stretch: the alert starts a retraining run
