@@ -308,7 +308,24 @@ PostgreSQL (features, prediction log, pgvector, MLflow's backend store), MinIO (
 
 `make k8s-up` ([`scripts/k8s-up.sh`](scripts/k8s-up.sh)) runs, in order: `.env` and `uv sync` → compose storage + vLLM → preflight ([`scripts/preflight.py`](scripts/preflight.py): `complaint-router@champion` exists, its reference window exists (built if not), the feature table is filled, the retrieval index exists (built if not)) → `minikube start` (profile `complaint-routing`, Kubernetes v1.30.0, 4 GB, 2 CPUs) → images built inside Minikube → Secret and ConfigMaps from `.env` and the repository → all manifests in [`k8s/`](k8s) → `kubectl rollout status` for every Deployment → a smoke request through the Service from a pod inside the cluster. It is idempotent: a second run reuses the cluster and the images of the same commit.
 
-BRINGUP_SECTION
+**How long it takes**, measured on a clean clone (`git clone` into a new directory, no `.env`, the Minikube profile deleted first, so every image is built from scratch), commit `66c2438`: **11 min 16 s**. The three longest steps: building the three images inside Minikube (8 min 49 s; the assistant image installs CPU torch and downloads the embedding model, and the three builds run one after another, so they could run in parallel or come from a registry cache), waiting for the Deployments to become ready (89 s; the assistant loads the embedding model and checks vLLM, the router downloads its model from the registry), and `minikube start` (25 s with the Kubernetes images already cached by an earlier start; ~4 min on a machine that has never pulled them). A second `make k8s-up` with the cluster and images in place takes **14 s**. The first clean-clone run failed in the preflight: the Makefile reads `.env` before the script creates it, so the database URL it exported had an empty user and password; the script now builds it after `.env` exists (commit `66c2438`), and the run above is the one after the fix.
+
+```text
+$ git clone <repo> clean-clone && cd clean-clone && time make k8s-up
+[   0s] == 0/8 local environment (.env, uv)
+[   2s] == 1/8 storage next to the cluster: PostgreSQL, MinIO, MLflow (docker compose); vLLM
+[   4s] == 2/8 preflight: registry, reference window, features, retrieval index
+[  26s] == 3/8 Minikube (complaint-routing: Kubernetes v1.30.0, docker driver, 4 GB, 2 CPUs)
+[  51s] == 4/8 images, tag = commit 66c2438cc908, built inside Minikube
+[ 580s] == 5/8 namespace, Secret (from .env), ConfigMaps
+[ 581s] == 6/8 workloads: MLflow, router, assistant, monitoring, drift CronJob
+[ 583s] == 7/8 waiting for every Deployment to be ready
+[ 672s] == 8/8 smoke request: POST http://router/predict from inside the cluster
+ready: True, image 66c2438cc908dd060c615441b7ddba7e72414c7c
+POST http://router/predict -> queue vehicle_loan (top 3 [('vehicle_loan', 0.5317), ('personal_loan', 0.3914), ('debt_collection', 0.0306)]), complaint-router@champion = v1, 43 ms
+[ 675s] == done in 675 s. Host access: make k8s-forward
+make k8s-up  8.60s user 7.85s system 2% cpu 11:15.82 total
+```
 
 Prerequisites, from Labs 2–3 and checked by the preflight: the registry has `complaint-router@champion` (`make data-pull && make train`), the warehouse has the feature table (`make etl-backfill`), and the vLLM image is built (`make llm-image`, 1.5–2 h once; without it everything comes up except the assistant, which stays not ready and says why).
 
@@ -511,7 +528,25 @@ InputDriftNarrativeLength active startsAt 2026-11-21T23:50:12.464Z receivers ['r
 ['drift_summary.json', 'evidently_drift_report.html']
 ```
 
-EMAIL_SECTION
+**The e-mail.** Alertmanager's `human` receiver sends it through Gmail SMTP (`smtp.gmail.com:587`, TLS, an app password). The address and password are three variables in `.env` (`ALERT_SMTP_USER`, `ALERT_SMTP_PASSWORD`, `ALERT_EMAIL_TO`); `make k8s-up` or `make alert-config` turns them into the Secret `alertmanager-config` ([`render_alertmanager.py`](scripts/render_alertmanager.py)), and they are never in git. Run again on the clean-clone deployment (commit `66c2438`) once e-mail was configured: a new shifted batch, p = 2.7·10⁻²⁸, one e-mail accepted by the SMTP server with no failure, and one webhook that started a new retraining Job. The message arrives as `[complaint-routing] FIRING: InputDriftNarrativeLength (page)`, with the summary, the description and the runbook link:
+
+```text
+$ make replay-shift SEED=2028      # 13:33 UTC
+300 held-out complaints (test months 2026-05..2026-07, seed 2028); shift=truncate: 108 rows changed (36%); median words 90, median chars 525
+{"sent": 300, "ok": 300, "errors": {}, "seconds": 3.4, "latency_p50_ms": 43.8, "latency_p95_ms": 62.1, "model_versions": {"1": 300}, "accuracy_vs_true_queue": 0.803}
+
+$ curl -s localhost:9093/api/v2/alerts
+InputDriftNarrativeLength active startsAt 2026-11-22T13:35:27.464Z receivers ['retrain', 'human'] | Complaint text changed: narrative length drifted (KS p = 2.7e-28)
+
+$ curl -s localhost:9093/metrics | grep notifications_total   # sent, and failures by reason
+alertmanager_notifications_total{integration="email"} 1
+alertmanager_notifications_total{integration="webhook"} 1
+alertmanager_notifications_failed_total{integration="email"} (all reasons) 0
+
+$ kubectl -n complaint-routing get jobs -l app=retrain
+NAME                 STATUS    COMPLETIONS   DURATION   AGE
+retrain-1795354568   Running   0/1           9s         9s
+```
 
 What the on-call engineer does next is in [`docs/runbook.md`](docs/runbook.md).
 
@@ -624,4 +659,4 @@ MacBook Pro M1 Pro, 16 GB; Docker Desktop with 8 CPUs and 12 GB; Minikube 1.34.0
 | Services deployed with health contracts | both Deployments ready on Minikube with readiness (`/health/ready`) and liveness (`/health/live`) probes; with an alias that does not exist the new router pod stays 0/1, is listed under `notReadyAddresses` and gets no traffic ([Lab 4, 3](#3-the-registry-by-alias-missing-model-promotion-rollback)) | Lab 4 |
 | Monitoring scheduled | CronJob `drift-monitor` every 5 min: reference window (validation months, in the champion's MLflow run) vs current window (prediction log); Grafana dashboard with the windows before and after the shift ([Lab 4, 4](#4-monitoring-on-a-schedule)) | Lab 4 |
 | Drift signal reaches a human | `make replay-shift` (30 % of narratives cut to 25 words) drives the KS p-value of narrative length from 0.11 to 1.7·10⁻²³ < 0.001; `InputDriftNarrativeLength` fires and Alertmanager delivers it by e-mail ([Lab 4, 5](#5-a-shift-injected-detected-and-a-person-alerted)); the same alert started a retraining Job that registered v3 `@candidate` (stretch, [6](#6-stretch-the-alert-starts-a-retraining-run)) | Lab 4 |
-| One command brings the system up | `make k8s-up` on a clean clone: storage, Minikube, images, all workloads, smoke request, BRINGUP_SHORT ([Lab 4, 1](#1-one-command-brings-it-up)) | Lab 4 |
+| One command brings the system up | `make k8s-up` on a clean clone: storage, Minikube, images, all workloads, smoke request, 11 min 16 s from a clean clone with the cluster deleted, 14 s when it is already up ([Lab 4, 1](#1-one-command-brings-it-up)) | Lab 4 |

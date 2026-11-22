@@ -10,3 +10,4 @@ data/fixtures/
 mlruns/
 *.zip
 lab-1.pdf
+.alertmanager.yml

@@ -752,8 +752,8 @@ Measured on the deployed services (MacBook Pro M1 Pro; Docker VM 8 CPUs / 12 GB;
 | Assistant `POST /ask` (retrieval + vLLM on CPU) | 20 evaluation questions, sequential | 7.1 s | 21.0 s | — |
 | Drift job (Evidently, 20 columns, 300 rows) | one window | < 1 s compute; ~15 s pod start | — | — |
 | Retraining Job (12 months + labelled serving rows, 14,824 rows) | one run | 7 min 26 s | — | — |
-| `make k8s-up`, images already built | everything up + smoke | BRINGUP_WARM | — | — |
-| `make k8s-up` on a clean clone (cluster deleted, images built) | everything | BRINGUP_COLD | — | — |
+| `make k8s-up`, cluster and images in place | everything checked + smoke | 14 s | — | — |
+| `make k8s-up` on a clean clone (no `.env`, cluster deleted) | everything: storage, preflight, cluster, 3 image builds, rollouts, smoke | 11 min 16 s (images 8 min 49 s, readiness 89 s, `minikube start` 25 s) | — | — |
 
 Against the budgets of 6.3: routing p95 25–110 ms vs 300 ms, throughput ≈ 90 req/s vs 5 req/s; the feature lookup (budget 50 ms) costs microseconds, because the table of one feature view fits in memory. The assistant (budget 15 s p95) misses it in the cluster: the 0.5 B model on CPU competes with Minikube for the same 8 cores.
 

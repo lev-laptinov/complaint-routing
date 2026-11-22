@@ -144,6 +144,13 @@ replay:  ## ROWS held-out complaints, unchanged, through POST /predict (needs ma
 replay-shift:  ## the documented shift: 30 % of narratives cut to their first 25 words
 	uv run python -m complaint_routing.monitoring.replay --rows $(ROWS) --seed $(SEED) --shift truncate --fraction 0.3 --words 25
 
+alert-config:  ## re-render Alertmanager's config from .env (e-mail settings) and reload it
+	uv run python scripts/render_alertmanager.py > .alertmanager.yml
+	$(K) create secret generic alertmanager-config --from-file=alertmanager.yml=.alertmanager.yml --dry-run=client -o yaml | $(K) apply -f -
+	rm -f .alertmanager.yml
+	$(K) rollout restart deployment/alertmanager
+	$(K) rollout status deployment/alertmanager --timeout=120s
+
 drift-now:  ## run the drift CronJob once, now, and print its log
 	$(K) delete job drift-manual --ignore-not-found
 	$(K) create job drift-manual --from=cronjob/drift-monitor
@@ -167,6 +174,6 @@ reference:  ## backfill the drift reference of the current champion (train.py lo
 dashboard:  ## regenerate k8s/monitoring/dashboard.json
 	uv run python scripts/make_dashboard.py
 
-.PHONY: k8s-up k8s-forward k8s-forward-stop k8s-status k8s-down smoke replay replay-shift drift-now psql-window registry promote reference dashboard
+.PHONY: k8s-up k8s-forward k8s-forward-stop k8s-status k8s-down smoke replay replay-shift drift-now alert-config psql-window registry promote reference dashboard
 .PHONY: llm-image llm-up llm-down corpus rag-index rag-ask llm-baseline rag-eval rag-sweep
 .PHONY: setup lint test up down data-pull data-push data-rebuild etl-backfill etl-month etl-wait counts bad-batch feast-apply feast-demo feast-materialize population-mix train reproduce
